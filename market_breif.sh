@@ -293,7 +293,7 @@ if [[ -z "$OPEN_TRADE" || "$OPEN_TRADE" == "null" ]]; then
 fi
 
 OPEN_TRADE_AI=$(echo "$OPEN_TRADE" | jq -c '{
-  symbol: (.symbol | sub("^s"; "")),
+  symbol: (.symbol | sub("^s\"; \"\")),
   entry: ("$" + (.entry | tostring)),
   tp1:   ("$" + (.tp1   | tostring)),
   tp2:   ("$" + (.tp2   | tostring)),
@@ -318,66 +318,99 @@ jq -n \
   --arg status "$TRADE_STATUS" \
   '{open_trade:$open, last_status:$status}' > "$STATE_FILE"
 
-# ── Assemble AI payload ────────────────────────────────────────
-info "Calling NVIDIA/Nebius ($MODEL)…"
+# ── Assemble AI payload 1: Structured Data ─────────────────────
+info "Calling NVIDIA/Nebius ($MODEL) — Data Pass…"
 
-SYSTEM_PROMPT='You are the lead analyst for The P.L.U.M.B.U.S. (Price Level Updates, Market Briefings, & Universal Signals).
-Synthesize the provided data into a structured JSON briefing containing two distinct versions of the report.
+SYSTEM_PROMPT_JSON='You are the lead analyst for The P.L.U.M.B.U.S. (Price Level Updates, Market Briefings, & Universal Signals).
+Synthesize the provided data into a structured JSON briefing.
 
 CRITICAL RULES:
 1. Use ONLY the pre-formatted price strings provided. Never invent or recalculate price levels.
-2. Never cross-reference prices between different assets.
-3. If TRADE_STATUS is STOP_LOSS, write a post-mortem in position_tracking.
-4. "briefing_json" is the structured data. "briefing_raw" is a conversational broadcast-style paragraph.
+2. Never cross-reference prices between different assets. Each asset has its own price.
+3. Never recycle entry/exit levels from closed trades into new setups.
+4. If TRADE_STATUS is STOP_LOSS, write a 2-sentence post-mortem in position_tracking explaining why momentum failed.
+5. Setups must reference assets from the WATCHLIST only, not the best candidate.
+6. headline must name the specific ticker, include the exact price, and state ONE specific market dynamic.
+7. Setups must distinguish between crypto spot, crypto perp, and stock perp assets where context is relevant.
 
 Required JSON keys:
-- headline: Punchy single-line session summary (max 100 chars).
-- analysis: Detailed paragraph synthesizing the signal narrative (max 500 chars).
-- position_tracking: Active trade update, or post-mortem if just closed.
-- watchlist: Clean multi-line grouped list: "📍 OVERSOLD:\n• TICKER ($price)\n📍 OVERBOUGHT:\n• ...\n📍 FUNDING SQUEEZE:\n• ..."
-- outlook: Strategic forward-looking teaser (max 250 chars).
-- setups: Array of exactly 3 setup strings for WATCHLIST assets (max 150 chars each).
-- briefing_raw: A conversational, urgent, broadcast-style paragraph (Bloomberg style) addressing "the desk". You MUST use clean ticker names (e.g., BTCUSDT, not sBTCUSDT). Start with a punchy hook. (max 1000 chars). No bullet points.'
+- headline, analysis, position_tracking, watchlist, outlook, setups (array of 3).'
 
-USER_CONTENT="SCOREBOARD: $STATS_STR
+USER_CONTENT_JSON="SCOREBOARD: $STATS_STR
 TRADE STATUS: $TRADE_STATUS
 ACTIVE TRADE: $OPEN_TRADE_AI
 BEST CANDIDATE: $BEST_TRADE_AI
 WATCHLIST: $WATCHLIST
 PREVIOUS SESSION: ${PREV_BRIEF:-Opening transmission.}
 
-Deliver the P.L.U.M.B.U.S. dual-mode JSON briefing now."
+Deliver the P.L.U.M.B.U.S. JSON briefing now."
 
-PAYLOAD=$(jq -n \
+PAYLOAD_JSON=$(jq -n \
   --arg model "$MODEL" \
   --arg temp  "$TEMPERATURE" \
   --argjson max "$MAX_TOKENS" \
-  --arg sys  "$SYSTEM_PROMPT" \
-  --arg data "$USER_CONTENT" \
+  --arg sys  "$SYSTEM_PROMPT_JSON" \
+  --arg data "$USER_CONTENT_JSON" \
   '{model:$model, temperature:($temp|tonumber), max_tokens:$max,
     response_format:{type:"json_object"},
     messages:[{role:"system",content:$sys},{role:"user",content:$data}]}')
 
-# ── Call AI with retry ─────────────────────────────────────────
-RESPONSE=""
-attempt=1; delay="$RETRY_DELAY"
-while (( attempt <= RETRY_MAX )); do
-  RESPONSE=$(curl -sfL -X POST "$NVIDIA_URL" \
-    -H "Authorization: Bearer $NVIDIA_KEY" \
-    -H "Content-Type: application/json" \
-    -d "$PAYLOAD" 2>/dev/null) && break
-  warn "API call failed (attempt $attempt/$RETRY_MAX)"
-  (( attempt++ ))
-  if (( attempt <= RETRY_MAX )); then sleep "$delay"; delay=$(( delay * 2 )); fi
-done
+# ── Assemble AI payload 2: Bloomberg Persona ──────────────────
+info "Calling NVIDIA/Nebius ($MODEL) — Desk Pass…"
 
-[[ -z "$RESPONSE" ]] && die "API did not respond after $RETRY_MAX attempts."
-if jq -e '.error' <<<"$RESPONSE" &>/dev/null; then
-  die "API error: $(jq -r '.error.message // .error' <<<"$RESPONSE")"
-fi
+SYSTEM_PROMPT_BLOOMBERG="You are the voice of a premium crypto intelligence channel — think Bloomberg anchor meets trading desk veteran. You address the channel directly as 'traders' or 'the desk'. You write with urgency, confidence, and controlled excitement. Every brief opens like a live broadcast, references what played out from the previous session if data is provided, and closes with a clear forward-looking statement that makes members feel the next brief is unmissable.
 
-JSON_OUT=$(jq -r '.choices[0].message.content // empty' <<<"$RESPONSE")
-[[ -z "$JSON_OUT" ]] && die "API returned empty response."
+Rules:
+- Open with a punchy broadcast-style headline for today's session
+- If previous brief context is provided, call back to 1-2 calls that played out (or didn't) — accountability builds trust
+- Use active voice, present tense where possible
+- Replace jargon with vivid plain language: 'directional efficiency' becomes 'clean relentless buying with no wasted moves'
+- Bold the 3 final trade setups as if reading them live on air
+- Close every brief with a forward teaser: what to watch before the next session
+- Never use bullet points — flowing paragraphs only, like a script"
+
+USER_CONTENT_BLOOMBERG="Previous session summary: ${PREV_BRIEF:-'No previous brief on record — this is our opening transmission.'}
+
+Today's market signals:
+${SPOT_SIGNALS}
+${PERP_SIGNALS}
+
+Deliver the full market intelligence brief now."
+
+PAYLOAD_BLOOMBERG=$(jq -n \
+  --arg model "$MODEL" \
+  --arg temp  "$TEMPERATURE" \
+  --argjson max "$MAX_TOKENS" \
+  --arg sys  "$SYSTEM_PROMPT_BLOOMBERG" \
+  --arg data "$USER_CONTENT_BLOOMBERG" \
+  '{model:$model, temperature:($temp|tonumber), max_tokens:$max,
+    messages:[{role:"system",content:$sys},{role:"user",content:$data}]}')
+
+# ── Execute AI Calls ──────────────────────────────────────────
+fetch_ai() {
+  local payload="$1" label="$2" out_var_name="$3"
+  local response="" attempt=1 delay="$RETRY_DELAY"
+  while (( attempt <= RETRY_MAX )); do
+    response=$(curl -sfL -X POST "$NVIDIA_URL" \
+      -H "Authorization: Bearer $NVIDIA_KEY" \
+      -H "Content-Type: application/json" \
+      -d "$payload" 2>/dev/null) && break
+    warn "API call $label failed (attempt $attempt/$RETRY_MAX)"
+    (( attempt++ ))
+    if (( attempt <= RETRY_MAX )); then sleep "$delay"; delay=$(( delay * 2 )); fi
+  done
+  [[ -z "$response" ]] && die "API $label did not respond."
+  if jq -e '.error' <<<"$response" &>/dev/null; then
+    die "API $label error: $(jq -r '.error.message // .error' <<<"$response")"
+  fi
+  eval "$out_var_name"='$(echo "$response")'
+}
+
+fetch_ai "$PAYLOAD_JSON" "JSON" "RESPONSE_JSON"
+fetch_ai "$PAYLOAD_BLOOMBERG" "Bloomberg" "RESPONSE_BLOOMBERG"
+
+JSON_OUT=$(jq -r '.choices[0].message.content // empty' <<<"$RESPONSE_JSON")
+BLOOMBERG_OUT=$(jq -r '.choices[0].message.content // empty' <<<"$RESPONSE_BLOOMBERG")
 
 # ── Save summary for next session ─────────────────────────────
 HEADLINE=$(echo "$JSON_OUT" | jq -r '.headline')
@@ -385,21 +418,14 @@ OUTLOOK=$(echo "$JSON_OUT"  | jq -r '.outlook')
 echo "$HEADLINE: $OUTLOOK" | cut -c1-200 > "$PREV_BRIEF_FILE"
 
 # ── Token stats ────────────────────────────────────────────────
-PROMPT_TOK=$(jq -r '.usage.prompt_tokens     // "?"' <<<"$RESPONSE")
-COMPL_TOK=$(jq  -r '.usage.completion_tokens // "?"' <<<"$RESPONSE")
+PROMPT_TOK=$(jq -r '.usage.prompt_tokens     // "?"' <<<"$RESPONSE_JSON")
+COMPL_TOK=$(jq  -r '.usage.completion_tokens // "?"' <<<"$RESPONSE_JSON")
 log "Tokens — prompt: ${PROMPT_TOK}, completion: ${COMPL_TOK}"
 
 # ── Terminal output ────────────────────────────────────────────
 echo -e "\n${BOLD}📡 THE P.L.U.M.B.U.S. TRANSMISSION${RESET}"
 echo -e "${DIM}$(date '+%Y-%m-%d %H:%M %Z')${RESET}\n"
-echo -e "${BOLD}SCOREBOARD:${RESET}        $STATS_STR"
-echo -e "${BOLD}HEADLINE:${RESET}          $HEADLINE"
-echo -e "\n${BOLD}ANALYSIS:${RESET}\n$(echo "$JSON_OUT" | jq -r '.analysis')"
-echo -e "\n${BOLD}POSITION TRACKING:${RESET}\n$(echo "$JSON_OUT" | jq -r '.position_tracking')"
-echo -e "\n${BOLD}ON RADAR:${RESET}\n$(echo "$JSON_OUT" | jq -r '.watchlist')"
-echo -e "\n${BOLD}OUTLOOK:${RESET} $OUTLOOK"
-echo -e "\n${BOLD}SETUPS:${RESET}"
-echo "$JSON_OUT" | jq -r '.setups[]' | sed 's/^/• /'
+echo "$BLOOMBERG_OUT"
 echo -e "\n${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
 
 # ── Telegram Output ────────────────────────────────────────────
@@ -419,7 +445,11 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
   OUTLOOK_ESC=$(esc "$OUTLOOK")
   HEADLINE_ESC=$(esc "$HEADLINE")
   SETUPS_HTML=$(echo "$JSON_OUT" | jq -r '.setups[]' | sed 's/</\&lt;/g; s/>/\&gt;/g' | sed 's/^/• /')
-  RAW_BRIEF_ESC=$(esc "$(echo "$JSON_OUT" | jq -r '.briefing_raw')")
+  
+  # Process Bloomberg output: strip 's' and wrap in <code> for tickers
+  # Use regex to find tickers and apply cleanup. 
+  # Note: sed in HTML mode needs careful escaping.
+  BLOOMBERG_CLEAN=$(echo "$BLOOMBERG_OUT" | sed -E 's/\bs([A-Z0-9]+USDT)\b/<code>\1<\/code>/g')
 
   FINAL_MSG="📡 <b>THE P.L.U.M.B.U.S. TRANSMISSION</b>
 📅 <code>${TIME_STAMP}</code>
@@ -452,7 +482,7 @@ ${SETUPS_HTML}"
 
   RAW_MSG="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-${RAW_BRIEF_ESC}
+${BLOOMBERG_CLEAN}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
