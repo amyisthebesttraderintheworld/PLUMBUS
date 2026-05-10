@@ -171,7 +171,7 @@ SPOT_SIGNALS=$(jq -c "
         \$res | map(select(.highEp > .lowEp))
         | map({
             symbol,
-            wickAsymm: (([.lastEp, .openEp] | min - .lowEp) / ((.highEp - ([.lastEp, .openEp] | max)) + 0.0001))
+            wickAsymm: ((([.lastEp, .openEp] | min) - .lowEp) / (.highEp - ([.lastEp, .openEp] | max) + 0.0001))
           })
         | { POTENTIAL_BOTTOM_ABSORPTION: (sort_by(.wickAsymm) | .[-5:] | reverse) }
       )
