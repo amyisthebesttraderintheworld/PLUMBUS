@@ -304,3 +304,22 @@ fi
 PROMPT_TOK=$(jq -r '.usage.prompt_tokens     // "?"' <<<"$RESPONSE")
 COMPL_TOK=$(jq  -r '.usage.completion_tokens // "?"' <<<"$RESPONSE")
 log "Tokens used — prompt: ${PROMPT_TOK}, completion: ${COMPL_TOK}"
+
+# ── Telegram Output ────────────────────────────────────────────
+if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
+  info "Sending to Telegram…"
+
+  # Clean up and format for Telegram HTML
+  # 1. Convert Markdown bold **text** to HTML <b>text</b>
+  # 2. Convert Phemex spot tickers (e.g. sBTCUSDT) to clean code tags (BTCUSDT)
+  TG_MSG=$(echo "$REPORT" \
+    | sed 's/\*\*\([^*]*\)\*\*/<b>\1<\/b>/g' \
+    | sed -E 's/\bs([A-Z0-9]+USDT)\b/<code>\1<\/code>/g')
+
+  curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+    -d chat_id="$TELEGRAM_CHAT_ID" \
+    -d parse_mode="HTML" \
+    --data-urlencode "text=$TG_MSG" >/dev/null
+    
+  ok "Telegram message sent."
+fi
