@@ -337,7 +337,7 @@ Required JSON keys:
 - watchlist: Clean multi-line grouped list: "📍 OVERSOLD:\n• TICKER ($price)\n📍 OVERBOUGHT:\n• ...\n📍 FUNDING SQUEEZE:\n• ..."
 - outlook: Strategic forward-looking teaser (max 250 chars).
 - setups: Array of exactly 3 setup strings for WATCHLIST assets (max 150 chars each).
-- briefing_raw: A conversational, urgent, broadcast-style paragraph (Bloomberg style) addressing "the desk". Start with a punchy hook. (max 800 chars). No bullet points.'
+- briefing_raw: A conversational, urgent, broadcast-style paragraph (Bloomberg style) addressing "the desk". You MUST use clean ticker names (e.g., BTCUSDT, not sBTCUSDT). Start with a punchy hook. (max 1000 chars). No bullet points.'
 
 USER_CONTENT="SCOREBOARD: $STATS_STR
 TRADE STATUS: $TRADE_STATUS
@@ -450,9 +450,11 @@ ${OUTLOOK_ESC}
 ⚡ <b>HIGH-CONVICTION SETUPS</b>
 ${SETUPS_HTML}"
 
-  RAW_MSG="Bruhhhh look at this shit
+  RAW_MSG="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-${RAW_BRIEF_ESC}"
+${RAW_BRIEF_ESC}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
   # Message 1: Structured
   curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
