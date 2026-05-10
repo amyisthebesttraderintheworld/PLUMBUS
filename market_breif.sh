@@ -11,7 +11,7 @@ ENV_FILE="${ENV_FILE:-.env}"
 STATE_FILE="${STATE_FILE:-./trade_state.json}"
 TRADE_HISTORY_FILE="${TRADE_HISTORY_FILE:-./trade_history.json}"
 TRADE_TIMEOUT_HOURS="${TRADE_TIMEOUT_HOURS:-24}"
-MODEL="${NVIDIA_MODEL:-nvidia/Llama-3.3-70B-Instruct}"
+MODEL="${NVIDIA_MODEL:-meta-llama/Llama-3.3-70B-Instruct}"
 TEMPERATURE="${NVIDIA_TEMPERATURE:-0.5}"
 MAX_TOKENS="${NVIDIA_MAX_TOKENS:-8192}"
 MIN_VOLUME="${MIN_VOLUME:-10000}"
@@ -21,7 +21,7 @@ RETRY_MAX=3
 RETRY_DELAY=2
 PHEMEX_SPOT="https://api.phemex.com/md/spot/ticker/24hr/all"
 PHEMEX_PERP="https://api.phemex.com/md/v3/ticker/24hr/all"
-NVIDIA_URL="https://api.tokenfactory.nebius.com/v1/chat/completions"
+NVIDIA_URL="https://api.studio.nebius.ai/v1/chat/completions"
 TMPDIR_LOCAL=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_LOCAL"' EXIT INT TERM
 
