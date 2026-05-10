@@ -36,16 +36,16 @@ warn()  { echo -e "${YELLOW}⚠${RESET}  $*" >&2; }
 die()   { echo -e "${RED}✖  ERROR:${RESET} $*" >&2; exit 1; }
 
 # ── Preflight checks ──────────────────────────────────────────                                          
-[[ -f "$ENV_FILE" ]] || die ".env file not found at '$ENV_FILE'. Export NVIDIA_KEY or set ENV_FILE."
-                                                                                                          
-# Security check: warn if .env is world-readable
-if [[ -f "$ENV_FILE" && "$(stat -c %a "$ENV_FILE" 2>/dev/null || stat -f %Lp "$ENV_FILE" 2>/dev/null)" =~ [0-9][0-9][1357] ]]; then
-  warn "$ENV_FILE has insecure permissions. Consider 'chmod 600 $ENV_FILE'."
+if [[ -f "$ENV_FILE" ]]; then
+  # Security check: warn if .env is world-readable
+  if [[ "$(stat -c %a "$ENV_FILE" 2>/dev/null || stat -f %Lp "$ENV_FILE" 2>/dev/null)" =~ [0-9][0-9][1357] ]]; then
+    warn "$ENV_FILE has insecure permissions. Consider 'chmod 600 $ENV_FILE'."
+  fi
+  # shellcheck source=/dev/null
+  source "$ENV_FILE"
 fi
 
-# shellcheck source=/dev/null
-source "$ENV_FILE"
-[[ -n "${NVIDIA_KEY:-}" ]] || die "NVIDIA_KEY is not set in $ENV_FILE"
+[[ -n "${NVIDIA_KEY:-}" ]] || die "NVIDIA_KEY is not set. Set it in $ENV_FILE or as an environment variable."
 
 command -v jq  &>/dev/null || die "jq is required but not installed."
 command -v curl &>/dev/null || die "curl is required but not installed."
