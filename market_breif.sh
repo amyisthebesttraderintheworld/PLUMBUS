@@ -191,9 +191,9 @@ Return a JSON object with:
 - setups (array of 3 high-conviction setup strings)
 - briefing_raw: A conversational, Bloomberg-style broadcast paragraph for "the desk". Use clean tickers (e.g. BTCUSDT). No bullets. Max 1000 chars.'
 
-# Truncate signals to save tokens
+# Assemble the intelligence data
 USER_CONTENT="SCOREBOARD: $STATS_STR
-TOP_SIGNALS: $(echo "${SPOT_SIGNALS} ${PERP_SIGNALS}" | jq -c '.[] | .[0:15]')
+SIGNALS: ${SPOT_SIGNALS} ${PERP_SIGNALS}
 WATCHLIST: $WATCHLIST
 PREVIOUS: ${PREV_BRIEF:-Opening transmission.}
 
