@@ -20,9 +20,12 @@ NVIDIA_URL="https://api.tokenfactory.nebius.com/v1/chat/completions"
 TMPDIR_LOCAL=$(mktemp -d)                                                                                 
 trap 'rm -rf "$TMPDIR_LOCAL"' EXIT INT TERM                                                               
 
+STATE_FILE="${STATE_FILE:-./trade_state.json}"
+TRADE_HISTORY_FILE="${TRADE_HISTORY_FILE:-./trade_history.json}"
 PREV_BRIEF_FILE="${PREV_BRIEF_FILE:-./last_brief.txt}"                                                    
 PREV_BRIEF=""                                                                                             
 [[ -f "$PREV_BRIEF_FILE" ]] && PREV_BRIEF=$(cat "$PREV_BRIEF_FILE")                                                                                                                                                 
+
 # ── Colors ────────────────────────────────────────────────────                                          
 ESC=$(printf '\033')                                                                                      
 RED="${ESC}[0;31m"; YELLOW="${ESC}[1;33m"; GREEN="${ESC}[0;32m"                                           
@@ -37,16 +40,13 @@ die()   { echo -e "${RED}✖  ERROR:${RESET} $*" >&2; exit 1; }
 
 # ── Preflight checks ──────────────────────────────────────────                                          
 if [[ -f "$ENV_FILE" ]]; then
-  # Security check: warn if .env is world-readable
   if [[ "$(stat -c %a "$ENV_FILE" 2>/dev/null || stat -f %Lp "$ENV_FILE" 2>/dev/null)" =~ [0-9][0-9][1357] ]]; then
     warn "$ENV_FILE has insecure permissions. Consider 'chmod 600 $ENV_FILE'."
   fi
-  # shellcheck source=/dev/null
   source "$ENV_FILE"
 fi
 
 [[ -n "${NVIDIA_KEY:-}" ]] || die "NVIDIA_KEY is not set. Set it in $ENV_FILE or as an environment variable."
-
 command -v jq  &>/dev/null || die "jq is required but not installed."
 command -v curl &>/dev/null || die "curl is required but not installed."
 
@@ -59,7 +59,6 @@ fetch() {
   local url="$1" out="$2" label="${3:-Data}" attempt=1 delay="$RETRY_DELAY"
   while (( attempt <= RETRY_MAX )); do
     if curl -sfL --max-time 15 "$url" -o "$out" 2> "$TMPDIR_LOCAL/curl_err.txt"; then
-      # Basic validation: check if it is valid JSON and has a .result array
       if jq -e '.result | type == "array"' "$out" >/dev/null 2>&1; then
         return 0
       elif jq -e '.code != null and .code != 0' "$out" >/dev/null 2>&1; then
@@ -72,7 +71,6 @@ fetch() {
       local err=$(cat "$TMPDIR_LOCAL/curl_err.txt" 2>/dev/null || echo "Unknown error")
       warn "$label fetch failed: $err (attempt $attempt/$RETRY_MAX)"
     fi
-
     (( attempt++ ))
     if (( attempt <= RETRY_MAX )); then
       log "Retrying in ${delay}s..."
@@ -101,17 +99,16 @@ fi
 
 ok "Raw data fetched and validated."
 
-# ── Compute each signal (all local, no extra network calls) ───
+# ── Compute each signal ───────────────────────────────────────
 info "Computing signals…"
 
-# Process Spot Signals in one pass
 SPOT_SIGNALS=$(jq -c "
   .result as \$res
   | (\$res | map(select(.openEp != null and .openEp > 0))) as \$spot
   | {
       SIGNAL_OB: (
         \$spot
-        | map({symbol, changePct: (((.lastEp - .openEp) / .openEp) * 100), lastPx: .lastEp})
+        | map({symbol, changePct: (((.lastEp - .openEp) / .openEp) * 100), lastPx: (.lastEp / 100000000)})
         | sort_by(.changePct)
         | { MOST_OVERSOLD_PROXY: .[0:5], MOST_OVERBOUGHT_PROXY: (.[-5:] | reverse) }
       ),
@@ -127,27 +124,12 @@ SPOT_SIGNALS=$(jq -c "
         | sort_by(.rangePct)
         | { MAX_INTRADAY_VOLATILITY: (.[-10:] | reverse) }
       ),
-      SIGNAL_WICK: (
-        \$res | map(select(.highEp > .lowEp))
-        | map({
-            symbol,
-            upperWick: ((.highEp - ([.lastEp, .openEp] | max)) / (.highEp - .lowEp) * 100),
-            lowerWick: ((([.lastEp, .openEp] | min) - .lowEp) / (.highEp - .lowEp) * 100)
-          })
-        | { POTENTIAL_TOP_REJECTION: (sort_by(.upperWick) | .[-5:] | reverse), POTENTIAL_BOTTOM_ABSORPTION: (sort_by(.lowerWick) | .[-5:] | reverse) }
-      ),
       SIGNAL_ALPHA: (
         ((\$res | .[] | select(.symbol == \"sBTCUSDT\") | ((.lastEp - .openEp) / .openEp * 100)) // 0) as \$btcChange
         | \$spot
         | map({symbol, changePct: ((.lastEp - .openEp) / .openEp * 100), vs_btc_alpha: (((.lastEp - .openEp) / .openEp * 100) - \$btcChange)})
         | sort_by(.vs_btc_alpha)
         | { MARKET_LEADERS_OVER_BTC: (.[-5:] | reverse), MARKET_LAGGARDS_UNDER_BTC: .[0:5] }
-      ),
-      SIGNAL_CHAN: (
-        \$res | map(select(.highEp > .lowEp))
-        | map({symbol, channelPos: ((.lastEp - .lowEp) / (.highEp - .lowEp) * 100)})
-        | sort_by(.channelPos)
-        | { HUGGING_24H_LOWS: .[0:5], HUGGING_24H_HIGHS: (.[-5:] | reverse) }
       ),
       SIGNAL_TREND: (
         \$res | map(select(.highEp > .lowEp and .openEp > 0))
@@ -158,12 +140,11 @@ SPOT_SIGNALS=$(jq -c "
             dirEfficiency: (((.lastEp - .openEp) / .openEp * 100) / ((.highEp - .lowEp) / .lowEp * 100) * 100)
           })
         | sort_by(.dirEfficiency)
-        | { CLEANEST_DOWNTREND: .[0:5], CLEANEST_UPTREND: (.[-5:] | reverse) }
+        | { CLEANEST_UPTREND: (.[-5:] | reverse) }
       )
     }
 " "$SPOT_RAW")
 
-# Process Perp Signals in one pass
 PERP_SIGNALS=$(jq -c "
   .result as \$res
   | (\$res | map(select(.fundingRateRr != null and (.openRp | tonumber) > 0))) as \$perp
@@ -173,56 +154,58 @@ PERP_SIGNALS=$(jq -c "
         | map({symbol, fundingRate: (.fundingRateRr | tonumber * 100), priceChange: (((.lastRp | tonumber) - (.openRp | tonumber)) / (.openRp | tonumber) * 100)})
         | sort_by(.fundingRate)
         | { SHORTS_CROWDED_POTENTIAL_SQUEEZE: .[0:5], LONGS_CROWDED_POTENTIAL_DUMP: (.[-5:] | reverse) }
-      ),
-      SIGNAL_OI: (
-        \$res | map(select(.volumeRq != \"0\" and .volumeRq != null and .openInterestRv != null and (.volumeRq | tonumber) > $MIN_VOLUME))
-        | map({symbol, oiToVolRatio: ((.openInterestRv | tonumber) / (.volumeRq | tonumber))})
-        | sort_by(.oiToVolRatio)
-        | { HEAVY_ACCUMULATION_HIGH_OI: (.[-5:] | reverse) }
-      ),
-      SIGNAL_SQUEEZE: (
-        \$res | map(select(.fundingRateRr != null and .openInterestRv != null and .volumeRq != null and (.volumeRq | tonumber) > $MIN_VOLUME and (.fundingRateRr | tonumber) < 0))
-        | map({symbol, funding: (.fundingRateRr | tonumber * 100), oiToVol: ((.openInterestRv | tonumber) / (.volumeRq | tonumber)), squeezeScore: ((-(.fundingRateRr | tonumber)) * ((.openInterestRv | tonumber) / (.volumeRq | tonumber)))})
-        | sort_by(.squeezeScore) | reverse
-        | { SHORT_SQUEEZE_COMPOSITE: .[0:7] }
-      ),
-      SIGNAL_DIV: (
-        \$res | map(select(.openInterestRv != null and .openInterestChangeRv != null and (.volumeRq | tonumber) > $MIN_VOLUME and (.openInterestChangeRv | tonumber) > 0))
-        | map({
-            symbol,
-            priceChange: (((.lastRp | tonumber) - (.openRp | tonumber)) / (.openRp | tonumber) * 100),
-            oiChangePct: (.openInterestChangeRv | tonumber * 100),
-            divergenceScore: ((.openInterestChangeRv | tonumber * 100) - (((.lastRp | tonumber) - (.openRp | tonumber)) / (.openRp | tonumber) * 100))
-          })
-        | sort_by(.divergenceScore) | reverse
-        | { OI_PRICE_DIVERGENCE_COIL: .[0:5] }
       )
     }
 " "$PERP_RAW")
 
-ok "All signals computed."
+ok "Signals computed."
 
-# ── Assemble final payload ─────────────────────────────────────
-info "Calling NVIDIA/Nebius ($MODEL) — Desk Pass…"
+# ── Data Assembly for AI ──────────────────────────────────────
+# Build Watchlist
+WATCHLIST=$(jq -c "{
+  OVERSOLD:       (.SIGNAL_OB.MOST_OVERSOLD_PROXY[:3]  | map((.symbol | sub(\"^s\"; \"\")) + \" (\$\" + (.lastPx | tostring) + \")\")),
+  OVERBOUGHT:     (.SIGNAL_OB.MOST_OVERBOUGHT_PROXY[:3] | map((.symbol | sub(\"^s\"; \"\")) + \" (\$\" + (.lastPx | tostring) + \")\")),
+  FUNDING_SQUEEZE:(\$PERP.SIGNAL_FR.SHORTS_CROWDED_POTENTIAL_SQUEEZE[:3] | map((.symbol | sub(\"^s\"; \"\")) + \" (\$\" + (.lastPx | tostring) + \")\"))
+}" --argjson PERP "$PERP_SIGNALS" <<< "$SPOT_SIGNALS")
 
-SYSTEM_PROMPT="You are the voice of a premium crypto intelligence channel — think Bloomberg anchor meets trading desk veteran. You address the channel directly as 'traders' or 'the desk'. You write with urgency, confidence, and controlled excitement. Every brief opens like a live broadcast, references what played out from the previous session if data is provided, and closes with a clear forward-looking statement that makes members feel the next brief is unmissable.
+# Load Scoreboard
+STATS_STR=$(jq -s '
+  map(select(.result != null)) |
+  (map(select(.result | startswith("TP"))) | length) as $w |
+  (map(select(.result == "STOP_LOSS"))      | length) as $l |
+  ($w + $l) as $t |
+  if $t == 0 then "0 Wins - 0 Losses (0%)"
+  else "\($w) Wins - \($l) Losses (\(($w * 100 / $t) | round)%)"
+  end
+' "$TRADE_HISTORY_FILE" 2>/dev/null || echo "0 Wins - 0 Losses (0%)")
 
-Rules:
-- Open with a punchy broadcast-style headline for today's session
-- If previous brief context is provided, call back to 1-2 calls that played out (or didn't) — accountability builds trust
-- Use active voice, present tense where possible
-- Replace jargon with vivid plain language: 'directional efficiency' becomes 'clean relentless buying with no wasted moves'
-- Bold the 3 final trade setups as if reading them live on air
-- Close every brief with a forward teaser: what to watch before the next session
-- Never use bullet points — flowing paragraphs only, like a script"
+# ── Assemble AI payload ─────────────────────────────────────
+info "Calling NVIDIA/Nebius ($MODEL) — Full Intelligence Pass…"
 
-USER_CONTENT="Previous session summary: ${PREV_BRIEF:-'No previous brief on record — this is our opening transmission.'}
+SYSTEM_PROMPT='You are the lead analyst for The P.L.U.M.B.U.S. (Price Level Updates, Market Briefings, & Universal Signals).
+Synthesize the provided data into a structured JSON briefing containing two distinct versions of the report.
 
-Today's market signals:
-${SPOT_SIGNALS}
-${PERP_SIGNALS}
+CRITICAL RULES:
+1. "briefing_json" contains the structured detailed data. 
+2. "briefing_raw" is a conversational, broadcast-style paragraph (Bloomberg style) addressing "the desk". 
+3. You MUST use clean ticker names in "briefing_raw" (e.g., BTCUSDT, not sBTCUSDT). 
+4. Start "briefing_raw" with a punchy hook. (max 1000 chars). No bullet points.
 
-Deliver the full market intelligence brief now."
+Required JSON keys:
+- headline: Punchy single-line session summary (max 100 chars).
+- analysis: Detailed paragraph synthesizing the signal narrative (max 500 chars).
+- position_tracking: Current market position narrative or recent trade update.
+- watchlist: Clean multi-line grouped list: "📍 OVERSOLD:\n• TICKER ($price)\n📍 OVERBOUGHT:\n• ...\n📍 FUNDING SQUEEZE:\n• ..."
+- outlook: Strategic forward-looking teaser (max 250 chars).
+- setups: Array of exactly 3 setup strings for WATCHLIST assets (max 150 chars each).
+- briefing_raw: The conversational paragraph.'
+
+USER_CONTENT="SCOREBOARD: $STATS_STR
+SIGNALS: ${SPOT_SIGNALS} ${PERP_SIGNALS}
+WATCHLIST: $WATCHLIST
+PREVIOUS SESSION: ${PREV_BRIEF:-Opening transmission.}
+
+Deliver the P.L.U.M.B.U.S. dual-mode JSON briefing now."
 
 PAYLOAD=$(jq -n \
   --arg model       "$MODEL" \
@@ -234,92 +217,102 @@ PAYLOAD=$(jq -n \
     model:       $model,
     temperature: ($temperature | tonumber),
     max_tokens:  $max_tok,
+    response_format: { type: "json_object" },
     messages: [
       { role: "system", content: $system },
       { role: "user",   content: $data   }
     ]
   }')
 
-# ── Call NVIDIA API with retry ─────────────────────────────────
+# ── Call AI with retry ─────────────────────────────────────────
 RESPONSE=""
-attempt=1
-delay="$RETRY_DELAY"
+attempt=1; delay="$RETRY_DELAY"
 while (( attempt <= RETRY_MAX )); do
   RESPONSE=$(curl -sfL -X POST "$NVIDIA_URL" \
     -H "Authorization: Bearer $NVIDIA_KEY" \
     -H "Content-Type: application/json" \
     -d "$PAYLOAD" 2> "$TMPDIR_LOCAL/api_err.txt") && break
-
-  err_msg=$(cat "$TMPDIR_LOCAL/api_err.txt" 2>/dev/null || echo "Unknown error")
-  warn "API call failed: $err_msg (attempt $attempt/$RETRY_MAX)"
-
+  warn "API call failed (attempt $attempt/$RETRY_MAX)"
   (( attempt++ ))
-  if (( attempt <= RETRY_MAX )); then
-    log "Retrying in ${delay}s..."
-    sleep "$delay"
-    delay=$(( delay * 2 ))
-  fi
+  if (( attempt <= RETRY_MAX )); then sleep "$delay"; delay=$(( delay * 2 )); fi
 done
 
-[[ -z "$RESPONSE" ]] && die "API did not respond after $RETRY_MAX attempts."
-
-# Check for API-level error
+[[ -z "$RESPONSE" ]] && die "API did not respond."
 if jq -e '.error' <<<"$RESPONSE" &>/dev/null; then
   die "API error: $(jq -r '.error.message // .error' <<<"$RESPONSE")"
 fi
 
-REPORT=$(jq -r '.choices[0].message.content // empty' <<<"$RESPONSE")
-if [[ -z "$REPORT" ]]; then
-  die "API returned an empty response. (Model may have hit MAX_TOKENS during reasoning)"
-fi
+JSON_OUT=$(jq -r '.choices[0].message.content // empty' <<<"$RESPONSE")
+[[ -z "$JSON_OUT" ]] && die "API returned empty response."
 
 # ── Save summary for next session ─────────────────────────────
-echo "$RESPONSE" | jq -r '.choices[0].message.content' \
-  | head -3 \
-  | tr '\n' ' ' \
-  | cut -c1-200 > "$PREV_BRIEF_FILE"
+HEADLINE=$(echo "$JSON_OUT" | jq -r '.headline')
+OUTLOOK=$(echo "$JSON_OUT"  | jq -r '.outlook')
+echo "$HEADLINE: $OUTLOOK" | cut -c1-200 > "$PREV_BRIEF_FILE"
 
-# ── Render output ──────────────────────────────────────────────
-echo -e "\n${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-echo "$REPORT" \
-  | sed "s/^## \(.*\)/${BOLD}${CYAN}\1${RESET}/" \
-  | sed "s/^\*\*\(.*\)\*\*/${BOLD}\1${RESET}/"
-echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
+# ── Telegram Output ────────────────────────────────────────────
+if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
+  info "Broadcasting Transmission..."
 
-# ── Optional file save ─────────────────────────────────────────
-if [[ "$SAVE_REPORT" == "true" ]]; then
-  FILENAME="$REPORT_DIR/brief_$(date '+%Y%m%d_%H%M%S').md"
-  {
-    echo "# Market Intelligence Briefing"
-    echo "_Generated: $(date '+%Y-%m-%d %H:%M:%S %Z')_"
-    echo ""
-    echo "$REPORT"
-  } > "$FILENAME"
-  # Secure the saved report
-  chmod 600 "$FILENAME"
-  ok "Report saved → $FILENAME"
+  esc() { echo "$1" | sed 's/</\&lt;/g; s/>/\&gt;/g'; }
+  
+  TIME_STAMP=$(date '+%Y-%m-%d | %H:%M %Z')
+  ANALYSIS_ESC=$(esc "$(echo "$JSON_OUT" | jq -r '.analysis')")
+  POS_TRACK_ESC=$(esc "$(echo "$JSON_OUT" | jq -r '.position_tracking')")
+  WATCHLIST_ESC=$(esc "$(echo "$JSON_OUT" | jq -r '.watchlist')")
+  OUTLOOK_ESC=$(esc "$OUTLOOK")
+  HEADLINE_ESC=$(esc "$HEADLINE")
+  SETUPS_HTML=$(echo "$JSON_OUT" | jq -r '.setups[]' | sed 's/</\&lt;/g; s/>/\&gt;/g' | sed 's/^/• /')
+  
+  # Message 1: Structured P.L.U.M.B.U.S. Transmission
+  FINAL_MSG="📡 <b>THE P.L.U.M.B.U.S. TRANSMISSION</b>
+📅 <code>${TIME_STAMP}</code>
+
+📈 <b>SCOREBOARD</b>
+<blockquote>${STATS_STR}</blockquote>
+
+<b>SESSION HEADLINE</b>
+<blockquote>${HEADLINE_ESC}</blockquote>
+
+📊 <b>DESK ANALYSIS</b>
+${ANALYSIS_ESC}
+
+🎯 <b>POSITION TRACKING</b>
+${POS_TRACK_ESC}
+
+🔍 <b>ON RADAR</b>
+${WATCHLIST_ESC}
+
+🔭 <b>FORWARD OUTLOOK</b>
+${OUTLOOK_ESC}
+
+⚡ <b>HIGH-CONVICTION SETUPS</b>
+${SETUPS_HTML}"
+
+  curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+    -d chat_id="$TELEGRAM_CHAT_ID" \
+    -d parse_mode="HTML" \
+    --data-urlencode "text=$FINAL_MSG" >/dev/null
+
+  # Message 2: Conversational Bloomberg Briefing
+  BLOOMBERG_OUT=$(echo "$JSON_OUT" | jq -r '.briefing_raw')
+  BLOOMBERG_CLEAN=$(echo "$BLOOMBERG_OUT" | sed 's/\*\*\([^*]*\)\*\*/<b>\1<\/b>/g' | sed -E 's/\bs([A-Z0-9]+USDT)\b/<code>\1<\/code>/g')
+
+  RAW_MSG="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+${BLOOMBERG_CLEAN}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+    -d chat_id="$TELEGRAM_CHAT_ID" \
+    -d parse_mode="HTML" \
+    --data-urlencode "text=$RAW_MSG" >/dev/null
+
+  ok "Dual-message transmission complete."
 fi
 
 # ── Usage / token stats ────────────────────────────────────────
 PROMPT_TOK=$(jq -r '.usage.prompt_tokens     // "?"' <<<"$RESPONSE")
 COMPL_TOK=$(jq  -r '.usage.completion_tokens // "?"' <<<"$RESPONSE")
 log "Tokens used — prompt: ${PROMPT_TOK}, completion: ${COMPL_TOK}"
-
-# ── Telegram Output ────────────────────────────────────────────
-if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
-  info "Sending to Telegram…"
-
-  # Clean up and format for Telegram HTML
-  # 1. Convert Markdown bold **text** to HTML <b>text</b>
-  # 2. Convert Phemex spot tickers (e.g. sBTCUSDT) to clean code tags (BTCUSDT)
-  TG_MSG=$(echo "$REPORT" \
-    | sed 's/\*\*\([^*]*\)\*\*/<b>\1<\/b>/g' \
-    | sed -E 's/\bs([A-Z0-9]+USDT)\b/<code>\1<\/code>/g')
-
-  curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-    -d chat_id="$TELEGRAM_CHAT_ID" \
-    -d parse_mode="HTML" \
-    --data-urlencode "text=$TG_MSG" >/dev/null
-    
-  ok "Telegram message sent."
-fi
