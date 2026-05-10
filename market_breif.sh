@@ -322,16 +322,13 @@ jq -n \
 info "Calling NVIDIA/Nebius ($MODEL)…"
 
 SYSTEM_PROMPT='You are the lead analyst for The P.L.U.M.B.U.S. (Price Level Updates, Market Briefings, & Universal Signals).
-Synthesize the provided data into a structured JSON briefing.
+Synthesize the provided data into a structured JSON briefing containing two distinct versions of the report.
 
 CRITICAL RULES:
 1. Use ONLY the pre-formatted price strings provided. Never invent or recalculate price levels.
-2. Never cross-reference prices between different assets. Each asset has its own price.
-3. Never recycle entry/exit levels from closed trades into new setups.
-4. If TRADE_STATUS is STOP_LOSS, write a 2-sentence post-mortem in position_tracking explaining why momentum failed.
-5. Setups must reference assets from the WATCHLIST only, not the best candidate.
-6. headline must name the specific ticker, include the exact price, and state ONE specific market dynamic (e.g. "NVDA perp clears $118.40 on 96% directional efficiency as TradFi volume accelerates"). Generic summaries are unacceptable.
-7. Setups must distinguish between crypto spot, crypto perp, and stock perp assets where context is relevant.
+2. Never cross-reference prices between different assets.
+3. If TRADE_STATUS is STOP_LOSS, write a post-mortem in position_tracking.
+4. "briefing_json" is the structured data. "briefing_raw" is a conversational broadcast-style paragraph.
 
 Required JSON keys:
 - headline: Punchy single-line session summary (max 100 chars).
@@ -339,7 +336,8 @@ Required JSON keys:
 - position_tracking: Active trade update, or post-mortem if just closed.
 - watchlist: Clean multi-line grouped list: "📍 OVERSOLD:\n• TICKER ($price)\n📍 OVERBOUGHT:\n• ...\n📍 FUNDING SQUEEZE:\n• ..."
 - outlook: Strategic forward-looking teaser (max 250 chars).
-- setups: Array of exactly 3 setup strings for WATCHLIST assets (max 150 chars each).'
+- setups: Array of exactly 3 setup strings for WATCHLIST assets (max 150 chars each).
+- briefing_raw: A conversational, urgent, broadcast-style paragraph (Bloomberg style) addressing "the desk". Start with a punchy hook. (max 800 chars). No bullet points.'
 
 USER_CONTENT="SCOREBOARD: $STATS_STR
 TRADE STATUS: $TRADE_STATUS
@@ -348,7 +346,7 @@ BEST CANDIDATE: $BEST_TRADE_AI
 WATCHLIST: $WATCHLIST
 PREVIOUS SESSION: ${PREV_BRIEF:-Opening transmission.}
 
-Deliver the P.L.U.M.B.U.S. JSON briefing now."
+Deliver the P.L.U.M.B.U.S. dual-mode JSON briefing now."
 
 PAYLOAD=$(jq -n \
   --arg model "$MODEL" \
@@ -421,6 +419,7 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
   OUTLOOK_ESC=$(esc "$OUTLOOK")
   HEADLINE_ESC=$(esc "$HEADLINE")
   SETUPS_HTML=$(echo "$JSON_OUT" | jq -r '.setups[]' | sed 's/</\&lt;/g; s/>/\&gt;/g' | sed 's/^/• /')
+  RAW_BRIEF_ESC=$(esc "$(echo "$JSON_OUT" | jq -r '.briefing_raw')")
 
   FINAL_MSG="📡 <b>THE P.L.U.M.B.U.S. TRANSMISSION</b>
 📅 <code>${TIME_STAMP}</code>
@@ -451,12 +450,23 @@ ${OUTLOOK_ESC}
 ⚡ <b>HIGH-CONVICTION SETUPS</b>
 ${SETUPS_HTML}"
 
+  RAW_MSG="Bruhhhh look at this shit
+
+${RAW_BRIEF_ESC}"
+
+  # Message 1: Structured
   curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
     -d chat_id="$TELEGRAM_CHAT_ID" \
     -d parse_mode="HTML" \
     --data-urlencode "text=$FINAL_MSG" >/dev/null
 
-  ok "Telegram message sent."
+  # Message 2: Conversational
+  curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+    -d chat_id="$TELEGRAM_CHAT_ID" \
+    -d parse_mode="HTML" \
+    --data-urlencode "text=$RAW_MSG" >/dev/null
+
+  ok "Both Telegram messages sent."
 fi
 
 echo -e "\n${BOLD}DONE.${RESET}"
