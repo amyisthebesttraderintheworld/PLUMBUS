@@ -79,6 +79,22 @@ command -v jq   &>/dev/null || die "jq is required but not installed."
 command -v curl &>/dev/null || die "curl is required but not installed."
 command -v bc   &>/dev/null || die "bc is required but not installed."
 
+# ── Mutex Lock ────────────────────────────────────────────────
+LOCKFILE="/tmp/plumbus_brief.lock"
+exec 200>"$LOCKFILE"
+flock -n 200 || exit 0
+
+# ── Heartbeat Check ───────────────────────────────────────────
+# Ensure the 15-minute sentry is actually running
+if [[ -f ".plumbus_heartbeat" ]]; then
+  LAST_PULSE=$(stat -c %Y .plumbus_heartbeat)
+  NOW=$(date +%s)
+  if (( (NOW - LAST_PULSE) > 1800 )); then
+    warn "CRON HEARTBEAT FAILURE: Sentry hasn't pulsed in >30 mins."
+    # Optional: Send alert to Telegram if credentials exist
+  fi
+fi
+
 # ── Load data ─────────────────────────────────────────────────
 if [[ -f "$STATE_FILE" ]]; then
   TRADE_STATE=$(cat "$STATE_FILE")
@@ -145,14 +161,19 @@ SPOT_SIGNALS=$(jq -c "
         | sort_by(.dirEfficiency)
         | { CLEANEST_UPTREND: (.[-5:] | reverse) }
       ),
+      SIGNAL_LIQ: (
+        \$res | map(select(.bidEp > 0 and .askEp > 0))
+        | map({symbol, spreadPct: (((.askEp - .bidEp) / .bidEp) * 100)})
+        | sort_by(.spreadPct)
+        | { MOST_LIQUID_LOW_SLIPPAGE: .[0:5], LOWEST_LIQUIDITY_HIGH_RISK: (.[-5:] | reverse) }
+      ),
       SIGNAL_WICK: (
         \$res | map(select(.highEp > .lowEp))
         | map({
             symbol,
-            upperWick: ((.highEp - ([.lastEp, .openEp] | max)) / (.highEp - .lowEp) * 100),
-            lowerWick: ((([.lastEp, .openEp] | min) - .lowEp) / (.highEp - .lowEp) * 100)
+            wickAsymm: (([.lastEp, .openEp] | min - .lowEp) / ((.highEp - ([.lastEp, .openEp] | max)) + 0.0001))
           })
-        | { POTENTIAL_TOP_REJECTION: (sort_by(.upperWick) | .[-5:] | reverse), POTENTIAL_BOTTOM_ABSORPTION: (sort_by(.lowerWick) | .[-5:] | reverse) }
+        | { POTENTIAL_BOTTOM_ABSORPTION: (sort_by(.wickAsymm) | .[-5:] | reverse) }
       )
     }
 " "$SPOT_RAW")
@@ -163,9 +184,18 @@ PERP_SIGNALS=$(jq -c "
   | {
       SIGNAL_FR: (
         \$perp
-        | map({symbol, lastPx: (.lastRp | tonumber), fundingRate: (.fundingRateRr | tonumber * 100), changePct: (((.lastRp | tonumber) - (.openRp | tonumber)) / (.openRp | tonumber) * 100)})
+        | map({symbol, lastPx: (.lastRp | tonumber), fundingRate: (.fundingRateRr | tonumber * 100), priceChange: (((.lastRp | tonumber) - (.openRp | tonumber)) / (.openRp | tonumber) * 100)})
         | sort_by(.fundingRate)
         | { SHORTS_CROWDED_POTENTIAL_SQUEEZE: .[0:5], LONGS_CROWDED_POTENTIAL_DUMP: (.[-5:] | reverse) }
+      ),
+      SIGNAL_CROWDING: (
+        \$perp
+        | map({
+            symbol,
+            crowding: ((.fundingRateRr | tonumber) * ((.openInterestRv | tonumber) / (.volumeRq | tonumber | if . == 0 then 1 else . end)))
+          })
+        | sort_by(.crowding)
+        | { MOST_CROWDED_EXHAUSTION: (.[-5:] | reverse) }
       ),
       SIGNAL_OI: (
         \$res | map(select(.volumeRq != \"0\" and .volumeRq != null and .openInterestRv != null and (.volumeRq | tonumber) > $MIN_VOLUME))
@@ -173,6 +203,7 @@ PERP_SIGNALS=$(jq -c "
         | sort_by(.oiToVolRatio)
         | { HEAVY_ACCUMULATION_HIGH_OI: (.[-5:] | reverse) }
       )
+
     }
 " "$PERP_RAW")
 
@@ -227,6 +258,8 @@ TRADE_STATUS="NONE"
 if [[ -n "$OPEN_TRADE" && "$OPEN_TRADE" != "null" ]]; then
   t_symbol=$(echo "$OPEN_TRADE" | jq -r '.symbol')
   t_sl=$(echo "$OPEN_TRADE"  | jq -r '.sl')
+  t_tp1=$(echo "$OPEN_TRADE" | jq -r '.tp1')
+  t_tp2=$(echo "$OPEN_TRADE" | jq -r '.tp2')
   t_tp3=$(echo "$OPEN_TRADE" | jq -r '.tp3')
   t_opened=$(echo "$OPEN_TRADE" | jq -r '.opened // 0')
   
@@ -256,6 +289,12 @@ if [[ -n "$OPEN_TRADE" && "$OPEN_TRADE" != "null" ]]; then
           '$t + {exit_price:($exit|tonumber), result:$status, closed_at:now}' >> "$TRADE_HISTORY_FILE"
       fi
       OPEN_TRADE=""
+    elif (( $(echo "$current >= $t_tp2" | bc -l) )); then TRADE_STATUS="TP2"
+    elif (( $(echo "$current >= $t_tp1" | bc -l) )); then
+      TRADE_STATUS="TP1"
+      # Move SL to Entry
+      t_entry=$(echo "$OPEN_TRADE" | jq -r '.entry')
+      OPEN_TRADE=$(echo "$OPEN_TRADE" | jq -c --arg e "$t_entry" '.sl = ($e|tonumber)')
     else TRADE_STATUS="RUNNING"
     fi
   fi

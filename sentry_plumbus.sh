@@ -39,6 +39,16 @@ fetch_json() {
   return 1
 }
 
+# ── Mutex Lock ────────────────────────────────────────────────
+# Prevent multiple sentry instances from running concurrently
+LOCKFILE="/tmp/plumbus_sentry.lock"
+exec 200>"$LOCKFILE"
+flock -n 200 || exit 0
+
+# ── Heartbeat ─────────────────────────────────────────────────
+# Pulse the heartbeat to prove the cron is alive
+touch .plumbus_heartbeat
+
 # ── Exit early if no open trade ───────────────────────────────
 [[ -f "$STATE_FILE" ]] || exit 0
 STATE=$(cat "$STATE_FILE")
@@ -127,8 +137,15 @@ if [[ "$NEW_STATUS" != "$LAST_STATUS" && -n "$ALERT_MSG" ]]; then
 
   if [[ "$NEW_STATUS" == "STOP_LOSS" || "$NEW_STATUS" == "TP3" ]]; then
     UPDATED_OPEN="null"
+    # ... history logging logic ...
+  elif [[ "$NEW_STATUS" == "TP1" ]]; then
+    # Move SL to Entry
+    entry_px=$(echo "$OPEN_TRADE" | jq -r '.entry')
+    UPDATED_OPEN=$(echo "$OPEN_TRADE" | jq -c --arg e "$entry_px" '.sl = ($e|tonumber)')
+  fi
 
-    # Dedup: only log if this specific trade session hasn't been closed in history
+  # Dedup: only log if this specific trade session hasn't been closed in history
+  if [[ "$NEW_STATUS" == "STOP_LOSS" || "$NEW_STATUS" == "TP3" ]]; then
     ALREADY=$(jq -s "map(select(.symbol==\"$SYMBOL\" and .opened==$OPENED_TS and .result==\"$NEW_STATUS\")) | length" \
       "$HISTORY_FILE" 2>/dev/null || echo 0)
 
