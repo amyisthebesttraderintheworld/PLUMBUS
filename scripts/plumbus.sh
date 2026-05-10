@@ -8,8 +8,8 @@ set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────
 ENV_FILE="${ENV_FILE:-.env}"
-STATE_FILE="${STATE_FILE:-./trade_state.json}"
-TRADE_HISTORY_FILE="${TRADE_HISTORY_FILE:-./trade_history.json}"
+STATE_FILE="${STATE_FILE:-./data/trade_state.json}"
+TRADE_HISTORY_FILE="${TRADE_HISTORY_FILE:-./data/trade_history.json}"
 MODEL="${NVIDIA_MODEL:-meta-llama/Llama-3.3-70B-Instruct}"
 TEMPERATURE="${NVIDIA_TEMPERATURE:-0.6}"
 MAX_TOKENS="${NVIDIA_MAX_TOKENS:-4096}"
@@ -18,13 +18,17 @@ SAVE_REPORT="${SAVE_REPORT:-false}"
 REPORT_DIR="${REPORT_DIR:-./reports}"
 RETRY_MAX=3
 RETRY_DELAY=2
+API_TIMEOUT="${API_TIMEOUT:-15}"
+NVIDIA_TIMEOUT="${NVIDIA_TIMEOUT:-30}"
+TELEGRAM_TIMEOUT="${TELEGRAM_TIMEOUT:-10}"
 PHEMEX_SPOT="https://api.phemex.com/md/spot/ticker/24hr/all"
 PHEMEX_PERP="https://api.phemex.com/md/v3/ticker/24hr/all"
 NVIDIA_URL="https://api.studio.nebius.ai/v1/chat/completions"
 TMPDIR_LOCAL=$(mktemp -d)
+LOG_FILE="${LOG_FILE:-./plumbus.log}"
 trap 'rm -rf "$TMPDIR_LOCAL"' EXIT INT TERM
 
-PREV_BRIEF_FILE="${PREV_BRIEF_FILE:-./last_brief.txt}"
+PREV_BRIEF_FILE="${PREV_BRIEF_FILE:-./data/last_brief.txt}"
 PREV_BRIEF=""
 [[ -f "$PREV_BRIEF_FILE" ]] && PREV_BRIEF=$(cat "$PREV_BRIEF_FILE")
 
@@ -40,6 +44,18 @@ ok()   { echo -e "${GREEN}✔${RESET} $*" >&2; }
 warn() { echo -e "${YELLOW}⚠${RESET}  $*" >&2; }
 die()  { echo -e "${RED}✖  ERROR:${RESET} $*" >&2; exit 1; }
 
+# Structured logging with timestamp
+log_event() {
+  local level="$1" msg="$2"
+  local ts=$(date '+%Y-%m-%d %H:%M:%S')
+  echo "[${ts}] [${level}] ${msg}" >> "$LOG_FILE"
+  case "$level" in
+    ERROR) die "$msg" ;;
+    WARN)  warn "$msg" ;;
+    INFO)  info "$msg" ;;
+  esac
+}
+
 normalize_decimal() {
   # Handles leading dots and ensures consistent decimal output
   echo "$1" | sed 's/^\./0./; s/^-\./-0./'
@@ -54,18 +70,43 @@ format_price() {
 
 fetch_json() {
   local url="$1" out="$2" label="$3" attempt=1 delay="$RETRY_DELAY"
+  local err_file="${out}.err"
+  
   while (( attempt <= RETRY_MAX )); do
-    if curl -sfL --max-time 15 "$url" -o "$out" 2>/dev/null; then
-      if jq -e '.result | type == "array"' "$out" >/dev/null 2>&1; then return 0; fi
-      warn "$label returned invalid JSON structure (attempt $attempt/$RETRY_MAX)"
+    log "Fetching $label (attempt $attempt/$RETRY_MAX)..."
+    
+    # Capture curl exit code and stderr
+    if curl -sfL --max-time "$API_TIMEOUT" --connect-timeout 5 "$url" -o "$out" 2>"$err_file"; then
+      if jq -e '.result | type == "array"' "$out" >/dev/null 2>&1; then 
+        ok "$label fetched successfully"
+        return 0
+      else
+        local json_err=$(jq -r '.error // .message // "Invalid structure"' "$out" 2>/dev/null || echo "Invalid JSON")
+        warn "$label returned invalid JSON structure: $json_err (attempt $attempt/$RETRY_MAX)"
+        log_event "WARN" "$label: Invalid JSON - $json_err"
+      fi
     else
-      warn "$label fetch failed (attempt $attempt/$RETRY_MAX)"
+      local curl_exit=$?
+      local err_msg=$(cat "$err_file" 2>/dev/null | tr '\n' ' ' || echo "Unknown error")
+      
+      case $curl_exit in
+        28) warn "$label API timeout (attempt $attempt/$RETRY_MAX)" ;;
+        35) warn "$label SSL error (attempt $attempt/$RETRY_MAX)" ;;
+        7)  warn "$label connection failed (attempt $attempt/$RETRY_MAX)" ;;
+        *)  warn "$label fetch failed with exit code $curl_exit: $err_msg (attempt $attempt/$RETRY_MAX)" ;;
+      esac
+      log_event "WARN" "$label fetch failed: exit=$curl_exit, error=$err_msg"
     fi
+    
     (( attempt++ ))
-    [[ $attempt -le $RETRY_MAX ]] && sleep "$delay"
-    delay=$(( delay * 2 ))
+    if [[ $attempt -le $RETRY_MAX ]]; then 
+      sleep "$delay"
+      delay=$(( delay * 2 ))
+    fi
   done
+  
   echo "FAILED" > "$out.status"
+  log_event "ERROR" "All retries exhausted for $label"
   return 1
 }
 
@@ -332,27 +373,33 @@ jq -n --argjson open "${OPEN_TRADE:-null}" --arg status "$TRADE_STATUS" \
 # ── Assemble AI payload ─────────────────────────────────────
 info "Calling NVIDIA/Nebius ($MODEL) — Full Intelligence Pass…"
 
-SYSTEM_PROMPT='You are the lead analyst for The P.L.U.M.B.U.S. (Price Level Updates, Market Briefings, & Universal Signals).
-Synthesize the provided data into a structured JSON briefing containing two distinct versions of the report.
+SYSTEM_PROMPT='You are the elite market strategist for The P.L.U.M.B.U.S. (Price Level Updates, Market Briefings, & Universal Signals).
+Deliver a high-value, professional market transmission that is sharp, actionable, and suitable for a trading desk.
+Inject personality into the voice: confident, direct, and slightly edgy, with a trading-desk cadence that still feels professional.
+Review all provided inputs and synthesize them into a structured JSON briefing that draws from every available data source: scoreboard, active trade state, best candidate, watchlist, spot/perp signal sets, and prior session context.
+When previous session context is available, reference it explicitly in your assessment: how today’s flow confirms, contradicts, or evolves that prior view.
 
 Required JSON keys:
 - headline: Punchy single-line session summary (max 100 chars).
-- analysis: Detailed paragraph synthesizing the signal narrative (max 500 chars).
+- analysis: Detailed paragraph synthesizing the signal narrative and trade context (max 800 chars).
+- trade_rationale: Concise rationale for the best candidate (max 150 chars).
 - position_tracking: Active trade update (entry, tp1, tp2, tp3, sl).
 - watchlist: Clean multi-line grouped list: "📍 OVERSOLD:\n• TICKER ($price)\n📍 OVERBOUGHT:\n• ...\n📍 FUNDING SQUEEZE:\n• ..."
 - outlook: Strategic forward-looking teaser (max 250 chars).
 - setups: Array of exactly 3 setup strings for WATCHLIST assets (max 150 chars each).
-- briefing_raw: A conversational, Bloomberg-style paragraph (Bloomberg style) addressing "the desk". You MUST use clean ticker names (e.g., BTCUSDT, not sBTCUSDT). Start with a punchy hook. (max 1000 chars). No bullet points.'
+- signal_context: Short signal-driven market pulse summary (max 200 chars).
+- briefing_raw: A conversational, Bloomberg-style paragraph addressing "the desk". Use clean ticker names (e.g., BTCUSDT, not sBTCUSDT). Start with a punchy hook. No bullet points. Mention the prior session when relevant. (max 1200 chars).'
 
 USER_CONTENT="SCOREBOARD: $STATS_STR
 TRADE STATUS: $TRADE_STATUS
 ACTIVE TRADE: $OPEN_TRADE_AI
 BEST CANDIDATE: $BEST_TRADE_AI
 WATCHLIST: $WATCHLIST
-SIGNALS: ${SPOT_SIGNALS} ${PERP_SIGNALS}
-PREVIOUS SESSION: ${PREV_BRIEF:-Opening transmission.}
+SPOT SIGNALS: $SPOT_SIGNALS
+PERP SIGNALS: $PERP_SIGNALS
+PREVIOUS REPORT: ${PREV_BRIEF:-Opening transmission.}
 
-Return the dual-mode JSON briefing."
+Return the dual-mode JSON briefing with strong desk personality and an explicit tie to the previous report."
 
 PAYLOAD=$(jq -n \
   --arg model "$MODEL" --arg temp "$TEMPERATURE" --argjson max "$MAX_TOKENS" \
@@ -362,19 +409,52 @@ PAYLOAD=$(jq -n \
     messages:[{role:"system",content:$sys},{role:"user",content:$data}]}')
 
 # ── AI Call ────────────────────────────────────────────────────
+log "Making NVIDIA API call..."
 RESPONSE=""
 attempt=1; delay="$RETRY_DELAY"
+err_file="/tmp/nvidia_api_error.txt"
+
 while (( attempt <= RETRY_MAX )); do
-  RESPONSE=$(curl -sfL -X POST "$NVIDIA_URL" \
+  log "NVIDIA API call (attempt $attempt/$RETRY_MAX)..."
+  
+  # Capture response and curl exit code
+  if RESPONSE=$(curl -sfL -X POST "$NVIDIA_URL" \
+    --max-time "$NVIDIA_TIMEOUT" \
     -H "Authorization: Bearer $NVIDIA_KEY" \
     -H "Content-Type: application/json" \
-    -d "$PAYLOAD" 2>/dev/null) && break
-  (( attempt++ )); sleep "$delay"; delay=$(( delay * 2 ))
+    -d "$PAYLOAD" 2>"$err_file"); then
+    
+    # Check if response contains an error
+    if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+      local api_error=$(echo "$RESPONSE" | jq -r '.error.message // .error // "Unknown error"')
+      warn "NVIDIA API error: $api_error (attempt $attempt/$RETRY_MAX)"
+      log_event "WARN" "NVIDIA API error: $api_error"
+    else
+      ok "NVIDIA API response received"
+      break
+    fi
+  else
+    local curl_exit=$?
+    local err_msg=$(cat "$err_file" 2>/dev/null | tr '\n' ' ' || echo "Unknown error")
+    
+    case $curl_exit in
+      28) warn "NVIDIA API timeout (attempt $attempt/$RETRY_MAX)" ;;
+      35) warn "NVIDIA SSL error (attempt $attempt/$RETRY_MAX)" ;;
+      *)  warn "NVIDIA API call failed with exit code $curl_exit (attempt $attempt/$RETRY_MAX)" ;;
+    esac
+    log_event "WARN" "NVIDIA API failed: exit=$curl_exit, error=$err_msg"
+  fi
+  
+  (( attempt++ ))
+  if [[ $attempt -le $RETRY_MAX ]]; then 
+    sleep "$delay"
+    delay=$(( delay * 2 ))
+  fi
 done
 
-[[ -z "$RESPONSE" ]] && die "API did not respond."
+[[ -z "$RESPONSE" ]] && log_event "ERROR" "NVIDIA API failed after $RETRY_MAX attempts"
 JSON_OUT=$(jq -r '.choices[0].message.content // empty' <<<"$RESPONSE")
-[[ -z "$JSON_OUT" ]] && die "AI returned empty content."
+[[ -z "$JSON_OUT" ]] && log_event "ERROR" "AI returned empty content"
 
 # ── Save summary ──────────────────────────────────────────────
 HEADLINE=$(echo "$JSON_OUT" | jq -r '.headline')
@@ -384,18 +464,26 @@ echo "$HEADLINE: $OUTLOOK" | cut -c1-200 > "$PREV_BRIEF_FILE"
 # ── Telegram Output ────────────────────────────────────────────
 if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
   info "Broadcasting Transmission..."
-  esc() { echo "$1" | sed 's/</\&lt;/g; s/>/\&gt;/g'; }
+  html_escape() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'; }
   TIME_STAMP=$(date '+%Y-%m-%d | %H:%M %Z')
   BEST_TICKER=$(echo "$BEST_TRADE_RAW" | jq -r '.symbol' | sed 's/^s//')
   BEST_PRICE=$(format_price "$(echo "$BEST_TRADE_RAW" | jq -r '.lastPx')")
   BEST_SURGE=$(echo "$BEST_TRADE_RAW" | jq -r '.changePct // 0' | xargs printf "%.2f%%")
 
-  ANALYSIS_ESC=$(esc "$(echo "$JSON_OUT" | jq -r '.analysis')")
-  POS_TRACK_ESC=$(esc "$(echo "$JSON_OUT" | jq -r '.position_tracking')")
-  WATCHLIST_ESC=$(esc "$(echo "$JSON_OUT" | jq -r '.watchlist')")
-  OUTLOOK_ESC=$(esc "$OUTLOOK")
-  HEADLINE_ESC=$(esc "$HEADLINE")
-  SETUPS_HTML=$(echo "$JSON_OUT" | jq -r '.setups[]' | sed 's/</\&lt;/g; s/>/\&gt;/g' | sed 's/^/• /')
+  ANALYSIS_ESC=$(html_escape "$(echo "$JSON_OUT" | jq -r '.analysis')")
+  POS_TRACK_ESC=$(html_escape "$(echo "$JSON_OUT" | jq -r '.position_tracking')")
+  WATCHLIST_ESC=$(html_escape "$(echo "$JSON_OUT" | jq -r '.watchlist')")
+  OUTLOOK_ESC=$(html_escape "$OUTLOOK")
+  HEADLINE_ESC=$(html_escape "$HEADLINE")
+  STATS_ESC=$(html_escape "$STATS_STR")
+  TRADE_RATIONALE=$(echo "$JSON_OUT" | jq -r '.trade_rationale // empty')
+  TRADE_RATIONALE_ESC=$(html_escape "$TRADE_RATIONALE")
+  if [[ -n "$TRADE_RATIONALE_ESC" ]]; then
+    TRADE_RATIONALE_SECTION="🎯 <b>TRADE RATIONALE</b>\n<blockquote>${TRADE_RATIONALE_ESC}</blockquote>\n\n"
+  else
+    TRADE_RATIONALE_SECTION=""
+  fi
+  SETUPS_HTML=$(echo "$JSON_OUT" | jq -r '.setups[]' | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' | sed 's/^/• /')
   BLOOMBERG_OUT=$(echo "$JSON_OUT" | jq -r '.briefing_raw')
   BLOOMBERG_CLEAN=$(echo "$BLOOMBERG_OUT" | sed 's/\*\*\([^*]*\)\*\*/<b>\1<\/b>/g' | sed -E 's/\bs([A-Z0-9]+USDT)\b/<code>\1<\/code>/g')
 
@@ -403,7 +491,7 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
 📅 <code>${TIME_STAMP}</code>
 
 📈 <b>SCOREBOARD</b>
-<blockquote>${STATS_STR}</blockquote>
+<pre>${STATS_ESC}</pre>
 
 <b>SESSION HEADLINE</b>
 <blockquote>${HEADLINE_ESC}</blockquote>
@@ -411,16 +499,16 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
 📊 <b>DESK ANALYSIS</b>
 ${ANALYSIS_ESC}
 
-🚀 <b>BEST CANDIDATE</b>
+${TRADE_RATIONALE_SECTION}🚀 <b>BEST CANDIDATE</b>
 • <b>Ticker:</b> <code>${BEST_TICKER}</code>
 • <b>Price:</b> <code>\$${BEST_PRICE}</code>
 • <b>24h Surge:</b> <code>${BEST_SURGE}</code>
 
 🎯 <b>POSITION TRACKING</b>
-${POS_TRACK_ESC}
+<pre>${POS_TRACK_ESC}</pre>
 
 🔍 <b>ON RADAR</b>
-${WATCHLIST_ESC}
+<pre>${WATCHLIST_ESC}</pre>
 
 🔭 <b>FORWARD OUTLOOK</b>
 ${OUTLOOK_ESC}
@@ -434,10 +522,50 @@ ${BLOOMBERG_CLEAN}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-  curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-    -d chat_id="$TELEGRAM_CHAT_ID" -d parse_mode="HTML" --data-urlencode "text=$FINAL_MSG" >/dev/null
-  curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-    -d chat_id="$TELEGRAM_CHAT_ID" -d parse_mode="HTML" --data-urlencode "text=$RAW_MSG" >/dev/null
+  # Send Telegram messages with error handling
+  log "Sending Telegram transmission..."
+  
+  local tg_attempt=1 tg_delay="$RETRY_DELAY" tg_err="/tmp/tg_error.txt"
+  
+  # Send FINAL_MSG
+  while (( tg_attempt <= RETRY_MAX )); do
+    if TG_RESP=$(curl -s --max-time "$TELEGRAM_TIMEOUT" "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+      -d chat_id="$TELEGRAM_CHAT_ID" -d parse_mode="HTML" --data-urlencode "text=$FINAL_MSG" 2>"$tg_err"); then
+      if echo "$TG_RESP" | jq -e '.ok == true' >/dev/null 2>&1; then
+        ok "Telegram message 1 sent"
+        break
+      else
+        local tg_error=$(echo "$TG_RESP" | jq -r '.description // "Unknown error"')
+        warn "Telegram error: $tg_error (attempt $tg_attempt/$RETRY_MAX)"
+        log_event "WARN" "Telegram message 1 failed: $tg_error"
+      fi
+    else
+      warn "Telegram API call failed (attempt $tg_attempt/$RETRY_MAX)"
+    fi
+    (( tg_attempt++ ))
+    if [[ $tg_attempt -le $RETRY_MAX ]]; then sleep "$tg_delay"; tg_delay=$(( tg_delay * 2 )); fi
+  done
+  
+  # Send RAW_MSG
+  tg_attempt=1 tg_delay="$RETRY_DELAY"
+  while (( tg_attempt <= RETRY_MAX )); do
+    if TG_RESP=$(curl -s --max-time "$TELEGRAM_TIMEOUT" "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+      -d chat_id="$TELEGRAM_CHAT_ID" -d parse_mode="HTML" --data-urlencode "text=$RAW_MSG" 2>"$tg_err"); then
+      if echo "$TG_RESP" | jq -e '.ok == true' >/dev/null 2>&1; then
+        ok "Telegram message 2 sent"
+        break
+      else
+        local tg_error=$(echo "$TG_RESP" | jq -r '.description // "Unknown error"')
+        warn "Telegram error: $tg_error (attempt $tg_attempt/$RETRY_MAX)"
+        log_event "WARN" "Telegram message 2 failed: $tg_error"
+      fi
+    else
+      warn "Telegram API call failed (attempt $tg_attempt/$RETRY_MAX)"
+    fi
+    (( tg_attempt++ ))
+    if [[ $tg_attempt -le $RETRY_MAX ]]; then sleep "$tg_delay"; tg_delay=$(( tg_delay * 2 )); fi
+  done
+  
   ok "Transmission complete."
 fi
 

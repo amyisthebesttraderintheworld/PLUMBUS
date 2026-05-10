@@ -1,0 +1,31 @@
+{
+  "result": [
+    {
+      "symbol": "sBTCUSDT",
+      "lastEp": 4500000000000,
+      "openEp": 4400000000000,
+      "highEp": 4550000000000,
+      "lowEp": 4350000000000,
+      "fundingRate": 0.0001,
+      "openInterest": "5000000"
+    },
+    {
+      "symbol": "sETHUSDT",
+      "lastEp": 250000000000,
+      "openEp": 230000000000,
+      "highEp": 260000000000,
+      "lowEp": 220000000000,
+      "fundingRate": 0.00015,
+      "openInterest": "2500000"
+    },
+    {
+      "symbol": "sSOLUSDT",
+      "lastEp": 20000000000,
+      "openEp": 18000000000,
+      "highEp": 22000000000,
+      "lowEp": 17000000000,
+      "fundingRate": 0.0002,
+      "openInterest": "1500000"
+    }
+  ]
+}
