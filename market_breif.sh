@@ -195,9 +195,9 @@ ok "All signals computed."
 
 # ── Build Watchlist ────────────────────────────────────────────
 WATCHLIST=$(jq -c "{
-  OVERSOLD:       (.SIGNAL_OB.MOST_OVERSOLD_PROXY[:3]  | map(.symbol + \" (\$\" + (.lastPx | tostring) + \")\")),
-  OVERBOUGHT:     (.SIGNAL_OB.MOST_OVERBOUGHT_PROXY[:3] | map(.symbol + \" (\$\" + (.lastPx | tostring) + \")\")),
-  FUNDING_SQUEEZE:(\$PERP.SIGNAL_FR.SHORTS_CROWDED_POTENTIAL_SQUEEZE[:3] | map(.symbol + \" (\$\" + (.lastPx | tostring) + \")\"))
+  OVERSOLD:       (.SIGNAL_OB.MOST_OVERSOLD_PROXY[:3]  | map((.symbol | sub(\"^s\"; \"\")) + \" (\$\" + (.lastPx | tostring) + \")\")),
+  OVERBOUGHT:     (.SIGNAL_OB.MOST_OVERBOUGHT_PROXY[:3] | map((.symbol | sub(\"^s\"; \"\")) + \" (\$\" + (.lastPx | tostring) + \")\")),
+  FUNDING_SQUEEZE:(\$PERP.SIGNAL_FR.SHORTS_CROWDED_POTENTIAL_SQUEEZE[:3] | map((.symbol | sub(\"^s\"; \"\")) + \" (\$\" + (.lastPx | tostring) + \")\"))
 }" --argjson PERP "$PERP_SIGNALS" <<< "$SPOT_SIGNALS")
 
 # ── Best Trade Selection ───────────────────────────────────────
@@ -219,7 +219,7 @@ BEST_TRADE_RAW=$(jq -n \
 ')
 
 BEST_TRADE_AI=$(echo "$BEST_TRADE_RAW" | jq -c '{
-  symbol,
+  symbol:     (.symbol | sub("^s"; "")),
   price:      ("$" + (.lastPx      | tostring)),
   changePct:  ((.changePct         | tostring) + "%"),
   efficiency: ((.dirEfficiency // 0 | tostring) + "%"),
@@ -293,7 +293,7 @@ if [[ -z "$OPEN_TRADE" || "$OPEN_TRADE" == "null" ]]; then
 fi
 
 OPEN_TRADE_AI=$(echo "$OPEN_TRADE" | jq -c '{
-  symbol,
+  symbol: (.symbol | sub("^s"; "")),
   entry: ("$" + (.entry | tostring)),
   tp1:   ("$" + (.tp1   | tostring)),
   tp2:   ("$" + (.tp2   | tostring)),
@@ -409,7 +409,7 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
   esc() { echo "$1" | sed 's/</\&lt;/g; s/>/\&gt;/g'; }
 
   TIME_STAMP=$(date '+%Y-%m-%d | %H:%M %Z')
-  BEST_TICKER=$(echo "$BEST_TRADE_RAW" | jq -r '.symbol')
+  BEST_TICKER=$(echo "$BEST_TRADE_RAW" | jq -r '.symbol' | sed 's/^s//')
   BEST_PRICE=$(format_price "$(echo "$BEST_TRADE_RAW" | jq -r '.lastPx')")
   BEST_SURGE=$(echo "$BEST_TRADE_RAW" | jq -r '.changePct // 0' | xargs printf "%.2f%%")
 

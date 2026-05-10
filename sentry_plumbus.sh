@@ -31,6 +31,7 @@ OPEN_TRADE=$(echo "$STATE" | jq -c '.open_trade // empty')
 [[ -n "$OPEN_TRADE" && "$OPEN_TRADE" != "null" ]] || exit 0
 
 SYMBOL=$(echo "$OPEN_TRADE"    | jq -r '.symbol')
+DISPLAY_SYMBOL=$(echo "$SYMBOL" | sed 's/^s//')
 SL=$(echo "$OPEN_TRADE"        | jq -r '.sl')
 TP1=$(echo "$OPEN_TRADE"       | jq -r '.tp1')
 TP2=$(echo "$OPEN_TRADE"       | jq -r '.tp2')
@@ -78,7 +79,7 @@ if (( $(echo "$CURRENT_PRICE <= $SL" | bc -l) )); then
   NEW_STATUS="STOP_LOSS"
   ALERT_MSG="🚨 <b>STOP LOSS TRIGGERED</b>
 
-Ticker: <code>$SYMBOL</code>
+Ticker: <code>$DISPLAY_SYMBOL</code>
 Exit:   <code>$CURRENT_PRICE</code>
 
 Trade closed. Full post-mortem in the next transmission."
@@ -87,7 +88,7 @@ elif (( $(echo "$CURRENT_PRICE >= $TP3" | bc -l) )); then
   NEW_STATUS="TP3"
   ALERT_MSG="💰 <b>TAKE PROFIT 3 — FULL EXIT</b>
 
-Ticker: <code>$SYMBOL</code>
+Ticker: <code>$DISPLAY_SYMBOL</code>
 Exit:   <code>$CURRENT_PRICE</code>
 
 Maximum target reached. Trade closed."
@@ -98,7 +99,7 @@ elif (( $(echo "$CURRENT_PRICE >= $TP2" | bc -l) )); then
     NEW_STATUS="TP2"
     ALERT_MSG="🎯 <b>TAKE PROFIT 2 REACHED</b>
 
-Ticker: <code>$SYMBOL</code>
+Ticker: <code>$DISPLAY_SYMBOL</code>
 Price:  <code>$CURRENT_PRICE</code>
 
 Consider trailing stop. Watching for TP3 at $TP3."
@@ -109,7 +110,7 @@ elif (( $(echo "$CURRENT_PRICE >= $TP1" | bc -l) )); then
     NEW_STATUS="TP1"
     ALERT_MSG="🎯 <b>TAKE PROFIT 1 REACHED</b>
 
-Ticker: <code>$SYMBOL</code>
+Ticker: <code>$DISPLAY_SYMBOL</code>
 Price:  <code>$CURRENT_PRICE</code>
 
 First milestone secured. Move stop to entry."
