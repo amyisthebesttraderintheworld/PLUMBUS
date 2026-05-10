@@ -1,0 +1,12 @@
+{
+  "open_trade": {
+    "symbol": "sLSKUSDT",
+    "entry": 0.1402,
+    "tp1": 0.141602,
+    "tp2": 0.144406,
+    "tp3": 0.148612,
+    "sl": 0.135994,
+    "opened": 1778396666.863241
+  },
+  "last_status": "NEW_TRADE"
+}

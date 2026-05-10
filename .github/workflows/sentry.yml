@@ -1,0 +1,34 @@
+name: P.L.U.M.B.U.S. Sentry
+
+on:
+  schedule:
+    - cron: '*/15 * * * *' # Every 15 minutes
+  workflow_dispatch:
+
+jobs:
+  sentry:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq bc curl
+
+      - name: Run Sentry
+        env:
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          chmod +x sentry_plumbus.sh
+          ./sentry_plumbus.sh
+
+      - name: Commit and Push Changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add trade_state.json trade_history.json
+          git commit -m "Sentry state update: $(date -u +'%Y-%m-%d %H:%M:%S') UTC" || echo "No changes to commit"
+          git push
