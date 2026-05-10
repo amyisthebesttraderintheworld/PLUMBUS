@@ -41,13 +41,32 @@ warn() { echo -e "${YELLOW}⚠${RESET}  $*" >&2; }
 die()  { echo -e "${RED}✖  ERROR:${RESET} $*" >&2; exit 1; }
 
 normalize_decimal() {
+  # Handles leading dots and ensures consistent decimal output
   echo "$1" | sed 's/^\./0./; s/^-\./-0./'
 }
 
 format_price() {
   local p="$1"
   if [[ -z "$p" || "$p" == "0" ]]; then echo "0.00"; return; fi
-  printf "%.8f" "$p" | sed 's/0*$//; s/\.$//'
+  # Use printf to avoid scientific notation, then strip trailing zeros
+  printf "%.10f" "$p" | sed 's/0*$//; s/\.$//'
+}
+
+fetch_json() {
+  local url="$1" out="$2" label="$3" attempt=1 delay="$RETRY_DELAY"
+  while (( attempt <= RETRY_MAX )); do
+    if curl -sfL --max-time 15 "$url" -o "$out" 2>/dev/null; then
+      if jq -e '.result | type == "array"' "$out" >/dev/null 2>&1; then return 0; fi
+      warn "$label returned invalid JSON structure (attempt $attempt/$RETRY_MAX)"
+    else
+      warn "$label fetch failed (attempt $attempt/$RETRY_MAX)"
+    fi
+    (( attempt++ ))
+    [[ $attempt -le $RETRY_MAX ]] && sleep "$delay"
+    delay=$(( delay * 2 ))
+  done
+  echo "FAILED" > "$out.status"
+  return 1
 }
 
 # ── Preflight checks ──────────────────────────────────────────
@@ -81,21 +100,8 @@ info "Fetching market data in parallel…"
 SPOT_RAW="$TMPDIR_LOCAL/spot.json"
 PERP_RAW="$TMPDIR_LOCAL/perp.json"
 
-fetch() {
-  local url="$1" out="$2" label="$3" attempt=1 delay="$RETRY_DELAY"
-  while (( attempt <= RETRY_MAX )); do
-    if curl -sfL --max-time 15 "$url" -o "$out" 2>/dev/null; then
-      if jq -e '.result | type == "array"' "$out" >/dev/null 2>&1; then return 0; fi
-    fi
-    (( attempt++ ))
-    sleep "$delay"; delay=$(( delay * 2 ))
-  done
-  echo "FAILED" > "$out.status"
-  return 1
-}
-
-fetch "$PHEMEX_SPOT" "$SPOT_RAW" "Spot" &
-fetch "$PHEMEX_PERP" "$PERP_RAW" "Perp" &
+fetch_json "$PHEMEX_SPOT" "$SPOT_RAW" "Spot" &
+fetch_json "$PHEMEX_PERP" "$PERP_RAW" "Perp" &
 wait
 
 [[ -f "$SPOT_RAW.status" || -f "$PERP_RAW.status" ]] && die "One or more data fetches failed."
@@ -187,11 +193,11 @@ BEST_TRADE_RAW=$(jq -n \
   [ ($spot + $perp)[] | .[] | .[] ]
   | map(select(.symbol != null))
   | map(.score =
-      ((.dirEfficiency // 0) * 2.5) +
-      ((.vs_btc_alpha  // 0) * 1.5) +
-      ((.rangePct      // 0) * 0.5) -
-      (if (.changePct // 0) > 25 then ((.changePct // 0) - 25) * 3 else 0 end) -
-      ((.fundingRate   // 0) * 15)
+      ((.dirEfficiency // 0 | tonumber) * 2.5) +
+      ((.vs_btc_alpha  // 0 | tonumber) * 1.5) +
+      ((.rangePct      // 0 | tonumber) * 0.5) -
+      (if (.changePct // 0 | tonumber) > 25 then ((.changePct // 0 | tonumber) - 25) * 3 else 0 end) -
+      ((.fundingRate   // 0 | tonumber) * 15)
     )
   | sort_by(.score) | reverse | .[0]
 ')
@@ -208,10 +214,12 @@ BEST_TRADE_AI=$(echo "$BEST_TRADE_RAW" | jq -c '{
 SYMBOL=$(echo "$BEST_TRADE_RAW" | jq -r '.symbol // "UNKNOWN"')
 ENTRY=$(echo "$BEST_TRADE_RAW" | jq -r '.lastPx // 0')
 RANGE=$(echo "$BEST_TRADE_RAW" | jq -r '.rangePct // 3')
-TP1=$(normalize_decimal "$(echo "scale=8; $ENTRY * (1 + ($RANGE * 0.008))" | bc -l)")
-TP2=$(normalize_decimal "$(echo "scale=8; $ENTRY * (1 + ($RANGE * 0.020))" | bc -l)")
-TP3=$(normalize_decimal "$(echo "scale=8; $ENTRY * (1 + ($RANGE * 0.040))" | bc -l)")
-SL=$(normalize_decimal  "$(echo "scale=8;  $ENTRY * (1 - ($RANGE * 0.015))" | bc -l)")
+
+# Dynamic TP/SL based on 24h volatility range
+TP1=$(normalize_decimal "$(echo "scale=10; $ENTRY * (1 + ($RANGE * 0.008))" | bc -l)")
+TP2=$(normalize_decimal "$(echo "scale=10; $ENTRY * (1 + ($RANGE * 0.020))" | bc -l)")
+TP3=$(normalize_decimal "$(echo "scale=10; $ENTRY * (1 + ($RANGE * 0.040))" | bc -l)")
+SL=$(normalize_decimal  "$(echo "scale=10; $ENTRY * (1 - ($RANGE * 0.015))" | bc -l)")
 
 # ── Evaluate existing trade state ──────────────────────────────
 info "Evaluating trade state…"
@@ -220,11 +228,12 @@ if [[ -n "$OPEN_TRADE" && "$OPEN_TRADE" != "null" ]]; then
   t_symbol=$(echo "$OPEN_TRADE" | jq -r '.symbol')
   t_sl=$(echo "$OPEN_TRADE"  | jq -r '.sl')
   t_tp3=$(echo "$OPEN_TRADE" | jq -r '.tp3')
+  t_opened=$(echo "$OPEN_TRADE" | jq -r '.opened // 0')
   
   IS_SPOT=$(jq -r ".result[] | select(.symbol==\"$t_symbol\") | has(\"lastEp\")" "$SPOT_RAW" 2>/dev/null | head -1 || echo "false")
   if [[ "$IS_SPOT" == "true" ]]; then
     RAW_EP=$(jq -r ".result[] | select(.symbol==\"$t_symbol\") | .lastEp // 0" "$SPOT_RAW" 2>/dev/null | head -1)
-    current=$(normalize_decimal "$(echo "scale=8; $RAW_EP / 100000000" | bc -l)")
+    current=$(normalize_decimal "$(echo "scale=10; $RAW_EP / 100000000" | bc -l)")
   else
     current=$(jq -r ".result[] | select(.symbol==\"$t_symbol\") | .lastRp // 0" "$PERP_RAW" 2>/dev/null | head -1)
   fi
@@ -232,13 +241,20 @@ if [[ -n "$OPEN_TRADE" && "$OPEN_TRADE" != "null" ]]; then
   if [[ -n "$current" && "$current" != "0" ]]; then
     if (( $(echo "$current <= $t_sl" | bc -l) )); then
       TRADE_STATUS="STOP_LOSS"
-      jq -n --argjson t "$OPEN_TRADE" --arg exit "$current" --arg status "STOP_LOSS" \
-        '$t + {exit_price:($exit|tonumber), result:$status, closed_at:now}' >> "$TRADE_HISTORY_FILE"
+      # Deduplicate: only log if this specific trade session hasn't been closed in history
+      ALREADY=$(jq -s "map(select(.symbol==\"$t_symbol\" and .opened==$t_opened)) | length" "$TRADE_HISTORY_FILE" 2>/dev/null || echo 0)
+      if [[ "$ALREADY" == "0" ]]; then
+        jq -n --argjson t "$OPEN_TRADE" --arg exit "$current" --arg status "STOP_LOSS" \
+          '$t + {exit_price:($exit|tonumber), result:$status, closed_at:now}' >> "$TRADE_HISTORY_FILE"
+      fi
       OPEN_TRADE=""
     elif (( $(echo "$current >= $t_tp3" | bc -l) )); then
       TRADE_STATUS="TP3"
-      jq -n --argjson t "$OPEN_TRADE" --arg exit "$current" --arg status "TP3" \
-        '$t + {exit_price:($exit|tonumber), result:$status, closed_at:now}' >> "$TRADE_HISTORY_FILE"
+      ALREADY=$(jq -s "map(select(.symbol==\"$t_symbol\" and .opened==$t_opened)) | length" "$TRADE_HISTORY_FILE" 2>/dev/null || echo 0)
+      if [[ "$ALREADY" == "0" ]]; then
+        jq -n --argjson t "$OPEN_TRADE" --arg exit "$current" --arg status "TP3" \
+          '$t + {exit_price:($exit|tonumber), result:$status, closed_at:now}' >> "$TRADE_HISTORY_FILE"
+      fi
       OPEN_TRADE=""
     else TRADE_STATUS="RUNNING"
     fi

@@ -18,10 +18,25 @@ STATE_FILE="./trade_state.json"
 HISTORY_FILE="./trade_history.json"
 PHEMEX_SPOT="https://api.phemex.com/md/spot/ticker/24hr/all"
 PHEMEX_PERP="https://api.phemex.com/md/v3/ticker/24hr/all"
+RETRY_MAX=3
+RETRY_DELAY=2
 
-# ── Normalize bc output (leading dot → leading zero) ──────────
+# ── Helpers ───────────────────────────────────────────────────
 normalize_decimal() {
   echo "$1" | sed 's/^\./0./; s/^-\./-0./'
+}
+
+fetch_json() {
+  local url="$1" out="$2" label="$3" attempt=1 delay="$RETRY_DELAY"
+  while (( attempt <= RETRY_MAX )); do
+    if curl -sfL --max-time 15 "$url" -o "$out" 2>/dev/null; then
+      if jq -e '.result | type == "array"' "$out" >/dev/null 2>&1; then return 0; fi
+    fi
+    (( attempt++ ))
+    [[ $attempt -le $RETRY_MAX ]] && sleep "$delay"
+    delay=$(( delay * 2 ))
+  done
+  return 1
 }
 
 # ── Exit early if no open trade ───────────────────────────────
@@ -30,41 +45,30 @@ STATE=$(cat "$STATE_FILE")
 OPEN_TRADE=$(echo "$STATE" | jq -c '.open_trade // empty')
 [[ -n "$OPEN_TRADE" && "$OPEN_TRADE" != "null" ]] || exit 0
 
-SYMBOL=$(echo "$OPEN_TRADE"    | jq -r '.symbol')
+SYMBOL=$(echo "$OPEN_TRADE"     | jq -r '.symbol')
 DISPLAY_SYMBOL=$(echo "$SYMBOL" | sed 's/^s//')
-SL=$(echo "$OPEN_TRADE"        | jq -r '.sl')
-TP1=$(echo "$OPEN_TRADE"       | jq -r '.tp1')
-TP2=$(echo "$OPEN_TRADE"       | jq -r '.tp2')
-TP3=$(echo "$OPEN_TRADE"       | jq -r '.tp3')
-LAST_STATUS=$(echo "$STATE"    | jq -r '.last_status // "NONE"')
-
-# ── Migrate old raw-integer format → decimal ──────────────────
-# If SL > 1000 it's still the old unscaled integer format.
-if (( $(echo "$SL > 1000" | bc -l) )); then
-  SL=$(normalize_decimal  "$(echo "scale=8; $SL  / 100000000" | bc -l)")
-  TP1=$(normalize_decimal "$(echo "scale=8; $TP1 / 100000000" | bc -l)")
-  TP2=$(normalize_decimal "$(echo "scale=8; $TP2 / 100000000" | bc -l)")
-  TP3=$(normalize_decimal "$(echo "scale=8; $TP3 / 100000000" | bc -l)")
-fi
+SL=$(echo "$OPEN_TRADE"         | jq -r '.sl')
+TP1=$(echo "$OPEN_TRADE"        | jq -r '.tp1')
+TP2=$(echo "$OPEN_TRADE"        | jq -r '.tp2')
+TP3=$(echo "$OPEN_TRADE"        | jq -r '.tp3')
+OPENED_TS=$(echo "$OPEN_TRADE"  | jq -r '.opened // 0')
+LAST_STATUS=$(echo "$STATE"     | jq -r '.last_status // "NONE"')
 
 # ── Fetch market data ─────────────────────────────────────────
 TMP_SPOT=$(mktemp); TMP_PERP=$(mktemp)
 trap 'rm -f "$TMP_SPOT" "$TMP_PERP"' EXIT INT TERM
 
-curl -sfL --max-time 15 "$PHEMEX_SPOT" -o "$TMP_SPOT" 2>/dev/null || true
-curl -sfL --max-time 15 "$PHEMEX_PERP" -o "$TMP_PERP" 2>/dev/null || true
+fetch_json "$PHEMEX_SPOT" "$TMP_SPOT" "Spot" &
+fetch_json "$PHEMEX_PERP" "$TMP_PERP" "Perp" &
+wait
 
 # ── Normalize current price ────────────────────────────────────
-# FIX: Spot tickers (sXXXUSDT) return lastEp as a raw integer scaled by 1e8.
-#      Perp tickers return lastRp as a decimal string.
-#      Comparing without normalization causes STOP_LOSS to fire on every run
-#      (e.g. 0.1462 is always < 13832200).
 IS_SPOT=$(jq -r ".result[] | select(.symbol==\"$SYMBOL\") | has(\"lastEp\")" "$TMP_SPOT" 2>/dev/null \
   | head -1 || echo "false")
 
 if [[ "$IS_SPOT" == "true" ]]; then
   RAW_EP=$(jq -r ".result[] | select(.symbol==\"$SYMBOL\") | .lastEp // 0" "$TMP_SPOT" 2>/dev/null | head -1)
-  CURRENT_PRICE=$(normalize_decimal "$(echo "scale=8; ${RAW_EP:-0} / 100000000" | bc -l)")
+  CURRENT_PRICE=$(normalize_decimal "$(echo "scale=10; ${RAW_EP:-0} / 100000000" | bc -l)")
 else
   CURRENT_PRICE=$(jq -r ".result[] | select(.symbol==\"$SYMBOL\") | .lastRp // 0" "$TMP_PERP" 2>/dev/null | head -1)
 fi
@@ -94,7 +98,6 @@ Exit:   <code>$CURRENT_PRICE</code>
 Maximum target reached. Trade closed."
 
 elif (( $(echo "$CURRENT_PRICE >= $TP2" | bc -l) )); then
-  # FIX: pure bash string comparison — no jq boolean abuse
   if [[ "$LAST_STATUS" != "TP2" && "$LAST_STATUS" != "TP3" ]]; then
     NEW_STATUS="TP2"
     ALERT_MSG="🎯 <b>TAKE PROFIT 2 REACHED</b>
@@ -125,9 +128,8 @@ if [[ "$NEW_STATUS" != "$LAST_STATUS" && -n "$ALERT_MSG" ]]; then
   if [[ "$NEW_STATUS" == "STOP_LOSS" || "$NEW_STATUS" == "TP3" ]]; then
     UPDATED_OPEN="null"
 
-    # Dedup: only log if not already recorded for this symbol+opened combo
-    OPENED_TS=$(echo "$OPEN_TRADE" | jq -r '.opened')
-    ALREADY=$(jq -s "map(select(.symbol==\"$SYMBOL\" and (.opened // 0) == ($OPENED_TS | tonumber) and .result==\"$NEW_STATUS\")) | length" \
+    # Dedup: only log if this specific trade session hasn't been closed in history
+    ALREADY=$(jq -s "map(select(.symbol==\"$SYMBOL\" and .opened==$OPENED_TS and .result==\"$NEW_STATUS\")) | length" \
       "$HISTORY_FILE" 2>/dev/null || echo 0)
 
     if [[ "$ALREADY" == "0" ]]; then
@@ -146,8 +148,10 @@ if [[ "$NEW_STATUS" != "$LAST_STATUS" && -n "$ALERT_MSG" ]]; then
     '{open_trade:$open, last_status:$status}' > "$STATE_FILE"
 
   # Send Telegram alert
-  curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-    -d chat_id="$TELEGRAM_CHAT_ID" \
-    -d parse_mode="HTML" \
-    --data-urlencode "text=$ALERT_MSG" >/dev/null
+  if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
+    curl -s "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+      -d chat_id="$TELEGRAM_CHAT_ID" \
+      -d parse_mode="HTML" \
+      --data-urlencode "text=$ALERT_MSG" >/dev/null
+  fi
 fi
