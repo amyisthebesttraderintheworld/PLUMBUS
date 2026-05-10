@@ -6,8 +6,8 @@ set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────                                          
 ENV_FILE="${ENV_FILE:-.env}"
-MODEL="${NVIDIA_MODEL:-nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B}"
-TEMPERATURE="${NVIDIA_TEMPERATURE:-0.5}"
+MODEL="${NVIDIA_MODEL:-meta-llama/Llama-3.3-70B-Instruct}"
+TEMPERATURE="${NVIDIA_TEMPERATURE:-0.6}"
 MAX_TOKENS="${NVIDIA_MAX_TOKENS:-4096}"                                                                   
 MIN_VOLUME="${MIN_VOLUME:-10000}"          # filter out low-volume noise (USD equiv)                      
 SAVE_REPORT="${SAVE_REPORT:-false}"        # set SAVE_REPORT=true to write to disk
@@ -16,10 +16,9 @@ RETRY_MAX=3
 RETRY_DELAY=2                                                                                             
 PHEMEX_SPOT="https://api.phemex.com/md/spot/ticker/24hr/all"                                              
 PHEMEX_PERP="https://api.phemex.com/md/v3/ticker/24hr/all"                                                
-NVIDIA_URL="https://api.tokenfactory.nebius.com/v1/chat/completions"                                      
+NVIDIA_URL="https://api.studio.nebius.ai/v1/chat/completions"                                      
 TMPDIR_LOCAL=$(mktemp -d)                                                                                 
-trap 'rm -rf "$TMPDIR_LOCAL"' EXIT INT TERM                                                               
-
+trap 'rm -rf "$TMPDIR_LOCAL"' EXIT INT TERM 
 STATE_FILE="${STATE_FILE:-./trade_state.json}"
 TRADE_HISTORY_FILE="${TRADE_HISTORY_FILE:-./trade_history.json}"
 PREV_BRIEF_FILE="${PREV_BRIEF_FILE:-./last_brief.txt}"                                                    
@@ -183,29 +182,22 @@ STATS_STR=$(jq -s '
 info "Calling NVIDIA/Nebius ($MODEL) — Full Intelligence Pass…"
 
 SYSTEM_PROMPT='You are the lead analyst for The P.L.U.M.B.U.S. (Price Level Updates, Market Briefings, & Universal Signals).
-Synthesize the provided data into a structured JSON briefing containing two distinct versions of the report.
+Return a JSON object with:
+- headline (100 chars)
+- analysis (500 chars)
+- position_tracking (active trade update)
+- watchlist (OVERSOLD/OVERBOUGHT/SQUEEZE lists)
+- outlook (250 chars)
+- setups (array of 3 high-conviction setup strings)
+- briefing_raw: A conversational, Bloomberg-style broadcast paragraph for "the desk". Use clean tickers (e.g. BTCUSDT). No bullets. Max 1000 chars.'
 
-CRITICAL RULES:
-1. "briefing_json" contains the structured detailed data. 
-2. "briefing_raw" is a conversational, broadcast-style paragraph (Bloomberg style) addressing "the desk". 
-3. You MUST use clean ticker names in "briefing_raw" (e.g., BTCUSDT, not sBTCUSDT). 
-4. Start "briefing_raw" with a punchy hook. (max 1000 chars). No bullet points.
-
-Required JSON keys:
-- headline: Punchy single-line session summary (max 100 chars).
-- analysis: Detailed paragraph synthesizing the signal narrative (max 500 chars).
-- position_tracking: Current market position narrative or recent trade update.
-- watchlist: Clean multi-line grouped list: "📍 OVERSOLD:\n• TICKER ($price)\n📍 OVERBOUGHT:\n• ...\n📍 FUNDING SQUEEZE:\n• ..."
-- outlook: Strategic forward-looking teaser (max 250 chars).
-- setups: Array of exactly 3 setup strings for WATCHLIST assets (max 150 chars each).
-- briefing_raw: The conversational paragraph.'
-
+# Truncate signals to save tokens
 USER_CONTENT="SCOREBOARD: $STATS_STR
-SIGNALS: ${SPOT_SIGNALS} ${PERP_SIGNALS}
+TOP_SIGNALS: $(echo "${SPOT_SIGNALS} ${PERP_SIGNALS}" | jq -c '.[] | .[0:15]')
 WATCHLIST: $WATCHLIST
-PREVIOUS SESSION: ${PREV_BRIEF:-Opening transmission.}
+PREVIOUS: ${PREV_BRIEF:-Opening transmission.}
 
-Deliver the P.L.U.M.B.U.S. dual-mode JSON briefing now."
+Return the dual-mode JSON briefing."
 
 PAYLOAD=$(jq -n \
   --arg model       "$MODEL" \
@@ -238,12 +230,22 @@ while (( attempt <= RETRY_MAX )); do
 done
 
 [[ -z "$RESPONSE" ]] && die "API did not respond."
+
+# Defensive JSON parsing
+if ! echo "$RESPONSE" | jq -e '.' >/dev/null 2>&1; then
+  die "API returned invalid JSON response. Raw: $(echo "$RESPONSE" | cut -c1-100)..."
+fi
+
 if jq -e '.error' <<<"$RESPONSE" &>/dev/null; then
   die "API error: $(jq -r '.error.message // .error' <<<"$RESPONSE")"
 fi
 
 JSON_OUT=$(jq -r '.choices[0].message.content // empty' <<<"$RESPONSE")
-[[ -z "$JSON_OUT" ]] && die "API returned empty response."
+[[ -z "$JSON_OUT" ]] && die "API returned empty content."
+
+if ! echo "$JSON_OUT" | jq -e '.' >/dev/null 2>&1; then
+  die "AI content is not valid JSON. Response may have been truncated."
+fi
 
 # ── Save summary for next session ─────────────────────────────
 HEADLINE=$(echo "$JSON_OUT" | jq -r '.headline')
