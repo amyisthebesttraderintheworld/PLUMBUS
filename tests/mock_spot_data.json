@@ -1,0 +1,31 @@
+{
+  "result": [
+    {
+      "symbol": "sBTCUSDT",
+      "lastEp": 4500000000000,
+      "openEp": 4400000000000,
+      "highEp": 4550000000000,
+      "lowEp": 4350000000000,
+      "turnover": "150000000",
+      "volume": "500000"
+    },
+    {
+      "symbol": "sETHUSDT",
+      "lastEp": 250000000000,
+      "openEp": 230000000000,
+      "highEp": 260000000000,
+      "lowEp": 220000000000,
+      "turnover": "75000000",
+      "volume": "300000"
+    },
+    {
+      "symbol": "sADAUSDT",
+      "lastEp": 100000000,
+      "openEp": 95000000,
+      "highEp": 110000000,
+      "lowEp": 90000000,
+      "turnover": "25000000",
+      "volume": "250000"
+    }
+  ]
+}

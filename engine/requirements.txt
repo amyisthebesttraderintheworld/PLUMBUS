@@ -1,0 +1,11 @@
+ccxt>=4.0.0
+asyncio
+numpy
+pandas
+matplotlib
+seaborn
+python-telegram-bot
+cryptography
+scipy
+networkx
+requests

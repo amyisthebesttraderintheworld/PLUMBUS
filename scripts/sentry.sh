@@ -14,8 +14,8 @@ export PATH="/usr/bin:/usr/local/bin:$PATH"
 ENV_FILE=".env"
 [[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
 
-STATE_FILE="./trade_state.json"
-HISTORY_FILE="./trade_history.json"
+STATE_FILE="./data/trade_state.json"
+HISTORY_FILE="./data/trade_history.json"
 PHEMEX_SPOT="https://api.phemex.com/md/spot/ticker/24hr/all"
 PHEMEX_PERP="https://api.phemex.com/md/v3/ticker/24hr/all"
 RETRY_MAX=3

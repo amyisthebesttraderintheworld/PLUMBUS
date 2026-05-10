@@ -9,4 +9,4 @@ cd "$PROJECT_DIR" || exit 1
 export PATH="/usr/bin:/usr/local/bin:$PATH"
 
 # Run the script
-./market_breif.sh >> "$PROJECT_DIR/plumbus.log" 2>&1
+./scripts/plumbus.sh >> "$PROJECT_DIR/plumbus.log" 2>&1

@@ -2,7 +2,7 @@ name: P.L.U.M.B.U.S. Daily Transmission
 
 on:
   schedule:
-    - cron: '0 9 * * *' # 9 AM UTC Daily
+    - cron: '30 9 * * *' # 09:30 UTC daily
   workflow_dispatch: # Allow manual trigger
 
 jobs:
@@ -23,8 +23,8 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
-          chmod +x market_breif.sh
-          ./market_breif.sh
+          chmod +x scripts/plumbus.sh run.sh
+          ./run.sh
 
       - name: Commit and Push Changes
         run: |
