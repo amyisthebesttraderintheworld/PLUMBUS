@@ -2,7 +2,7 @@ name: P.L.U.M.B.U.S. Daily Transmission
 
 on:
   schedule:
-    - cron: '30 9 * * *' # 09:30 UTC daily
+    - cron: '0 12 * * *' # 08:00 AM EDT daily
   workflow_dispatch: # Allow manual trigger
 
 jobs:
@@ -30,6 +30,6 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add trade_state.json trade_history.json last_brief.txt
+          git add data/trade_state.json data/trade_history.json data/last_brief.txt
           git commit -m "Automated state update: $(date -u +'%Y-%m-%d %H:%M:%S') UTC" || echo "No changes to commit"
           git push

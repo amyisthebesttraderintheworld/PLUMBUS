@@ -86,8 +86,8 @@ fetch_json() {
         log_event "WARN" "$label: Invalid JSON - $json_err"
       fi
     else
-      local curl_exit=$?
-      local err_msg=$(cat "$err_file" 2>/dev/null | tr '\n' ' ' || echo "Unknown error")
+      curl_exit=$?
+      err_msg=$(cat "$err_file" 2>/dev/null | tr '\n' ' ' || echo "Unknown error")
       
       case $curl_exit in
         28) warn "$label API timeout (attempt $attempt/$RETRY_MAX)" ;;
@@ -121,7 +121,7 @@ command -v curl &>/dev/null || die "curl is required but not installed."
 command -v bc   &>/dev/null || die "bc is required but not installed."
 
 # ── Mutex Lock ────────────────────────────────────────────────
-LOCKFILE="/tmp/plumbus_brief.lock"
+LOCKFILE="./data/plumbus_brief.lock"
 exec 200>"$LOCKFILE"
 flock -n 200 || exit 0
 
@@ -168,51 +168,51 @@ ok "Raw data fetched."
 info "Computing signals…"
 
 SPOT_SIGNALS=$(jq -c "
-  .result as \$res
-  | (\$res | map(select(.openEp != null and .openEp > 0))) as \$spot
+  (.result | if type == \"array\" then map(select(type == \"object\")) else [] end) as \$res
+  | (\$res | map(select(.openEp != null and (.openEp | tonumber) > 0))) as \$spot
   | {
       SIGNAL_OB: (
         \$spot
-        | map({symbol, changePct: (((.lastEp - .openEp) / .openEp) * 100), lastPx: (.lastEp / 100000000)})
+        | map(. as \$i | {symbol, changePct: ((((.lastEp | tonumber) - (.openEp | tonumber)) / (.openEp | tonumber)) * 100), lastPx: ((.lastEp | tonumber) / 100000000)})
         | sort_by(.changePct)
         | { MOST_OVERSOLD_PROXY: .[0:5], MOST_OVERBOUGHT_PROXY: (.[-5:] | reverse) }
       ),
       SIGNAL_VOL: (
-        \$res | map(select(.lowEp > 0 and .highEp > .lowEp))
-        | map({symbol, lastPx: (.lastEp / 100000000), rangePct: (((.highEp - .lowEp) / .lowEp) * 100)})
+        \$res | map(select(.lowEp != null and (.lowEp | tonumber) > 0 and (.highEp | tonumber) > (.lowEp | tonumber)))
+        | map(. as \$i | {symbol, lastPx: ((.lastEp | tonumber) / 100000000), rangePct: ((((.highEp | tonumber) - (.lowEp | tonumber)) / (.lowEp | tonumber)) * 100)})
         | sort_by(.rangePct)
         | { MAX_INTRADAY_VOLATILITY: (.[-10:] | reverse) }
       ),
       SIGNAL_ALPHA: (
-        ((\$res | .[] | select(.symbol == \"sBTCUSDT\") | ((.lastEp - .openEp) / .openEp * 100)) // 0) as \$btcChange
+        ((\$res | .[] | select(type == \"object\" and .symbol == \"sBTCUSDT\") | (((.lastEp | tonumber) - (.openEp | tonumber)) / (.openEp | tonumber) * 100)) // 0) as \$btcChange
         | \$spot
-        | map({symbol, lastPx: (.lastEp / 100000000), changePct: ((.lastEp - .openEp) / .openEp * 100), vs_btc_alpha: (((.lastEp - .openEp) / .openEp * 100) - \$btcChange)})
+        | map(. as \$i | {symbol, lastPx: ((.lastEp | tonumber) / 100000000), changePct: (((.lastEp | tonumber) - (.openEp | tonumber)) / (.openEp | tonumber) * 100), vs_btc_alpha: ((((.lastEp | tonumber) - (.openEp | tonumber)) / (.openEp | tonumber) * 100) - \$btcChange)})
         | sort_by(.vs_btc_alpha)
         | { MARKET_LEADERS_OVER_BTC: (.[-5:] | reverse), MARKET_LAGGARDS_UNDER_BTC: .[0:5] }
       ),
       SIGNAL_TREND: (
-        \$res | map(select(.highEp > .lowEp and .openEp > 0))
-        | map({
+        \$res | map(select(.highEp != null and .lowEp != null and (.highEp | tonumber) > (.lowEp | tonumber) and (.openEp | tonumber) > 0))
+        | map(. as \$i | {
             symbol,
-            lastPx: (.lastEp / 100000000),
-            changePct: ((.lastEp - .openEp) / .openEp * 100),
-            rangePct: ((.highEp - .lowEp) / .lowEp * 100),
-            dirEfficiency: (((.lastEp - .openEp) / .openEp * 100) / ((.highEp - .lowEp) / .lowEp * 100) * 100)
+            lastPx: ((.lastEp | tonumber) / 100000000),
+            changePct: (((.lastEp | tonumber) - (.openEp | tonumber)) / (.openEp | tonumber) * 100),
+            rangePct: (((.highEp | tonumber) - (.lowEp | tonumber)) / (.lowEp | tonumber) * 100),
+            dirEfficiency: ((((.lastEp | tonumber) - (.openEp | tonumber)) / (.openEp | tonumber) * 100) / (((.highEp | tonumber) - (.lowEp | tonumber)) / (.lowEp | tonumber) * 100) * 100)
           })
         | sort_by(.dirEfficiency)
         | { CLEANEST_UPTREND: (.[-5:] | reverse) }
       ),
       SIGNAL_LIQ: (
-        \$res | map(select(.bidEp > 0 and .askEp > 0))
-        | map({symbol, spreadPct: (((.askEp - .bidEp) / .bidEp) * 100)})
+        \$res | map(select(.bidEp != null and .askEp != null and (.bidEp | tonumber) > 0 and (.askEp | tonumber) > 0))
+        | map(. as \$i | {symbol, spreadPct: ((((.askEp | tonumber) - (.bidEp | tonumber)) / (.bidEp | tonumber)) * 100)})
         | sort_by(.spreadPct)
         | { MOST_LIQUID_LOW_SLIPPAGE: .[0:5], LOWEST_LIQUIDITY_HIGH_RISK: (.[-5:] | reverse) }
       ),
       SIGNAL_WICK: (
-        \$res | map(select(.highEp > .lowEp))
-        | map({
+        \$res | map(select(.highEp != null and .lowEp != null and (.highEp | tonumber) > (.lowEp | tonumber)))
+        | map(. as \$i | {
             symbol,
-            wickAsymm: ((([.lastEp, .openEp] | min) - .lowEp) / (.highEp - ([.lastEp, .openEp] | max) + 0.0001))
+            wickAsymm: ((([(.lastEp | tonumber), (.openEp | tonumber)] | min) - (.lowEp | tonumber)) / ((.highEp | tonumber) - ([(.lastEp | tonumber), (.openEp | tonumber)] | max) + 0.0001))
           })
         | { POTENTIAL_BOTTOM_ABSORPTION: (sort_by(.wickAsymm) | .[-5:] | reverse) }
       )
@@ -220,31 +220,30 @@ SPOT_SIGNALS=$(jq -c "
 " "$SPOT_RAW")
 
 PERP_SIGNALS=$(jq -c "
-  .result as \$res
+  (.result | if type == \"array\" then map(select(type == \"object\")) else [] end) as \$res
   | (\$res | map(select(.fundingRateRr != null and (.openRp | tonumber) > 0))) as \$perp
   | {
       SIGNAL_FR: (
         \$perp
-        | map({symbol, lastPx: (.lastRp | tonumber), fundingRate: (.fundingRateRr | tonumber * 100), priceChange: (((.lastRp | tonumber) - (.openRp | tonumber)) / (.openRp | tonumber) * 100)})
+        | map(. as \$i | {symbol, lastPx: (.lastRp | tonumber), fundingRate: (.fundingRateRr | tonumber * 100), priceChange: (((.lastRp | tonumber) - (.openRp | tonumber)) / (.openRp | tonumber) * 100)})
         | sort_by(.fundingRate)
         | { SHORTS_CROWDED_POTENTIAL_SQUEEZE: .[0:5], LONGS_CROWDED_POTENTIAL_DUMP: (.[-5:] | reverse) }
       ),
       SIGNAL_CROWDING: (
         \$perp
-        | map({
+        | map(. as \$i | {
             symbol,
-            crowding: ((.fundingRateRr | tonumber) * ((.openInterestRv | tonumber) / (.volumeRq | tonumber | if . == 0 then 1 else . end)))
+            crowding: ((.fundingRateRr | tonumber) * ((.openInterestRv | tonumber) / (.volumeRq | tonumber | if . == \"0\" or . == 0 then 1 else (. | tonumber) end)))
           })
         | sort_by(.crowding)
         | { MOST_CROWDED_EXHAUSTION: (.[-5:] | reverse) }
       ),
       SIGNAL_OI: (
         \$res | map(select(.volumeRq != \"0\" and .volumeRq != null and .openInterestRv != null and (.volumeRq | tonumber) > $MIN_VOLUME))
-        | map({symbol, oiToVolRatio: ((.openInterestRv | tonumber) / (.volumeRq | tonumber))})
+        | map(. as \$i | {symbol, oiToVolRatio: ((.openInterestRv | tonumber) / (.volumeRq | tonumber))})
         | sort_by(.oiToVolRatio)
         | { HEAVY_ACCUMULATION_HIGH_OI: (.[-5:] | reverse) }
       )
-
     }
 " "$PERP_RAW")
 
@@ -304,12 +303,12 @@ if [[ -n "$OPEN_TRADE" && "$OPEN_TRADE" != "null" ]]; then
   t_tp3=$(echo "$OPEN_TRADE" | jq -r '.tp3')
   t_opened=$(echo "$OPEN_TRADE" | jq -r '.opened // 0')
   
-  IS_SPOT=$(jq -r ".result[] | select(.symbol==\"$t_symbol\") | has(\"lastEp\")" "$SPOT_RAW" 2>/dev/null | head -1 || echo "false")
+  IS_SPOT=$(jq -r ".result[] | select(type == \"object\" and .symbol==\"$t_symbol\") | has(\"lastEp\")" "$SPOT_RAW" 2>/dev/null | head -1 || echo "false")
   if [[ "$IS_SPOT" == "true" ]]; then
-    RAW_EP=$(jq -r ".result[] | select(.symbol==\"$t_symbol\") | .lastEp // 0" "$SPOT_RAW" 2>/dev/null | head -1)
-    current=$(normalize_decimal "$(echo "scale=10; $RAW_EP / 100000000" | bc -l)")
+    RAW_EP=$(jq -r ".result[] | select(type == \"object\" and .symbol==\"$t_symbol\") | .lastEp // 0" "$SPOT_RAW" 2>/dev/null | head -1)
+    current=$(format_price "$(bc -l <<< "$RAW_EP / 100000000")")
   else
-    current=$(jq -r ".result[] | select(.symbol==\"$t_symbol\") | .lastRp // 0" "$PERP_RAW" 2>/dev/null | head -1)
+    current=$(jq -r ".result[] | select(type == \"object\" and .symbol==\"$t_symbol\") | .lastRp // 0" "$PERP_RAW" 2>/dev/null | head -1)
   fi
 
   if [[ -n "$current" && "$current" != "0" ]]; then
@@ -412,7 +411,7 @@ PAYLOAD=$(jq -n \
 log "Making NVIDIA API call..."
 RESPONSE=""
 attempt=1; delay="$RETRY_DELAY"
-err_file="/tmp/nvidia_api_error.txt"
+err_file="./data/nvidia_api_error.txt"
 
 while (( attempt <= RETRY_MAX )); do
   log "NVIDIA API call (attempt $attempt/$RETRY_MAX)..."
@@ -426,7 +425,7 @@ while (( attempt <= RETRY_MAX )); do
     
     # Check if response contains an error
     if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
-      local api_error=$(echo "$RESPONSE" | jq -r '.error.message // .error // "Unknown error"')
+      api_error=$(echo "$RESPONSE" | jq -r '.error.message // .error // "Unknown error"')
       warn "NVIDIA API error: $api_error (attempt $attempt/$RETRY_MAX)"
       log_event "WARN" "NVIDIA API error: $api_error"
     else
@@ -434,8 +433,8 @@ while (( attempt <= RETRY_MAX )); do
       break
     fi
   else
-    local curl_exit=$?
-    local err_msg=$(cat "$err_file" 2>/dev/null | tr '\n' ' ' || echo "Unknown error")
+    curl_exit=$?
+    err_msg=$(cat "$err_file" 2>/dev/null | tr '\n' ' ' || echo "Unknown error")
     
     case $curl_exit in
       28) warn "NVIDIA API timeout (attempt $attempt/$RETRY_MAX)" ;;
@@ -525,7 +524,7 @@ ${BLOOMBERG_CLEAN}
   # Send Telegram messages with error handling
   log "Sending Telegram transmission..."
   
-  local tg_attempt=1 tg_delay="$RETRY_DELAY" tg_err="/tmp/tg_error.txt"
+  tg_attempt=1 tg_delay="$RETRY_DELAY" tg_err="./data/tg_error.txt"
   
   # Send FINAL_MSG
   while (( tg_attempt <= RETRY_MAX )); do
@@ -535,7 +534,7 @@ ${BLOOMBERG_CLEAN}
         ok "Telegram message 1 sent"
         break
       else
-        local tg_error=$(echo "$TG_RESP" | jq -r '.description // "Unknown error"')
+        tg_error=$(echo "$TG_RESP" | jq -r '.description // "Unknown error"')
         warn "Telegram error: $tg_error (attempt $tg_attempt/$RETRY_MAX)"
         log_event "WARN" "Telegram message 1 failed: $tg_error"
       fi
@@ -555,7 +554,7 @@ ${BLOOMBERG_CLEAN}
         ok "Telegram message 2 sent"
         break
       else
-        local tg_error=$(echo "$TG_RESP" | jq -r '.description // "Unknown error"')
+        tg_error=$(echo "$TG_RESP" | jq -r '.description // "Unknown error"')
         warn "Telegram error: $tg_error (attempt $tg_attempt/$RETRY_MAX)"
         log_event "WARN" "Telegram message 2 failed: $tg_error"
       fi

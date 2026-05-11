@@ -1,0 +1,5 @@
+./run.sh: line 12: ./scripts/plumbus.sh: Permission denied
+./scripts/plumbus.sh: line 125: /tmp/plumbus_brief.lock: Permission denied
+[2026-05-11 08:05:19] [WARN] NVIDIA API failed: exit=28, error=
+[2026-05-11 08:06:49] [WARN] NVIDIA API failed: exit=28, error=
+[2026-05-11 08:07:21] [WARN] NVIDIA API failed: exit=28, error=

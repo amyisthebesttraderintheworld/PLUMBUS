@@ -73,14 +73,14 @@ fetch_json "$PHEMEX_PERP" "$TMP_PERP" "Perp" &
 wait
 
 # ── Normalize current price ────────────────────────────────────
-IS_SPOT=$(jq -r ".result[] | select(.symbol==\"$SYMBOL\") | has(\"lastEp\")" "$TMP_SPOT" 2>/dev/null \
+IS_SPOT=$(jq -r ".result[] | select(type == \"object\" and .symbol==\"$SYMBOL\") | has(\"lastEp\")" "$TMP_SPOT" 2>/dev/null \
   | head -1 || echo "false")
 
 if [[ "$IS_SPOT" == "true" ]]; then
-  RAW_EP=$(jq -r ".result[] | select(.symbol==\"$SYMBOL\") | .lastEp // 0" "$TMP_SPOT" 2>/dev/null | head -1)
+  RAW_EP=$(jq -r ".result[] | select(type == \"object\" and .symbol==\"$SYMBOL\") | .lastEp // 0" "$TMP_SPOT" 2>/dev/null | head -1)
   CURRENT_PRICE=$(normalize_decimal "$(echo "scale=10; ${RAW_EP:-0} / 100000000" | bc -l)")
 else
-  CURRENT_PRICE=$(jq -r ".result[] | select(.symbol==\"$SYMBOL\") | .lastRp // 0" "$TMP_PERP" 2>/dev/null | head -1)
+  CURRENT_PRICE=$(jq -r ".result[] | select(type == \"object\" and .symbol==\"$SYMBOL\") | .lastRp // 0" "$TMP_PERP" 2>/dev/null | head -1)
 fi
 
 [[ -n "$CURRENT_PRICE" && "$CURRENT_PRICE" != "0" ]] || exit 0
