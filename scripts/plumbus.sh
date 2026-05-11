@@ -19,7 +19,7 @@ REPORT_DIR="${REPORT_DIR:-./reports}"
 RETRY_MAX=3
 RETRY_DELAY=2
 API_TIMEOUT="${API_TIMEOUT:-15}"
-NVIDIA_TIMEOUT="${NVIDIA_TIMEOUT:-30}"
+NVIDIA_TIMEOUT="${NVIDIA_TIMEOUT:-60}"
 TELEGRAM_TIMEOUT="${TELEGRAM_TIMEOUT:-10}"
 PHEMEX_SPOT="https://api.phemex.com/md/spot/ticker/24hr/all"
 PHEMEX_PERP="https://api.phemex.com/md/v3/ticker/24hr/all"
@@ -267,7 +267,8 @@ BEST_TRADE_RAW=$(jq -n \
       ((.dirEfficiency // 0 | tonumber) * 2.5) +
       ((.vs_btc_alpha  // 0 | tonumber) * 1.5) +
       ((.rangePct      // 0 | tonumber) * 0.5) -
-      (if (.changePct // 0 | tonumber) > 25 then ((.changePct // 0 | tonumber) - 25) * 3 else 0 end) -
+      (if ((.changePct // 0 | tonumber) | if . < 0 then -. else . end) > 25 then (((.changePct // 0 | tonumber) | if . < 0 then -. else . end) - 25) * 3 else 0 end) -
+      (if (.rangePct // 0 | tonumber) > 50 then ((.rangePct // 0 | tonumber) - 50) * 2 else 0 end) -
       ((.fundingRate   // 0 | tonumber) * 15)
     )
   | sort_by(.score) | reverse | .[0]
@@ -286,11 +287,20 @@ SYMBOL=$(echo "$BEST_TRADE_RAW" | jq -r '.symbol // "UNKNOWN"')
 ENTRY=$(echo "$BEST_TRADE_RAW" | jq -r '.lastPx // 0')
 RANGE=$(echo "$BEST_TRADE_RAW" | jq -r '.rangePct // 3')
 
-# Dynamic TP/SL based on 24h volatility range
-TP1=$(normalize_decimal "$(echo "scale=10; $ENTRY * (1 + ($RANGE * 0.008))" | bc -l)")
-TP2=$(normalize_decimal "$(echo "scale=10; $ENTRY * (1 + ($RANGE * 0.020))" | bc -l)")
-TP3=$(normalize_decimal "$(echo "scale=10; $ENTRY * (1 + ($RANGE * 0.040))" | bc -l)")
-SL=$(normalize_decimal  "$(echo "scale=10; $ENTRY * (1 - ($RANGE * 0.015))" | bc -l)")
+# Cap volatility impact for TP/SL levels to prevent nonsensical targets on outliers
+CALC_RANGE=$RANGE
+if (( $(echo "$RANGE > 20" | bc -l) )); then CALC_RANGE=20; fi
+
+# Dynamic TP/SL based on capped volatility range
+TP1=$(normalize_decimal "$(echo "scale=10; $ENTRY * (1 + ($CALC_RANGE * 0.008))" | bc -l)")
+TP2=$(normalize_decimal "$(echo "scale=10; $ENTRY * (1 + ($CALC_RANGE * 0.020))" | bc -l)")
+TP3=$(normalize_decimal "$(echo "scale=10; $ENTRY * (1 + ($CALC_RANGE * 0.040))" | bc -l)")
+SL=$(normalize_decimal  "$(echo "scale=10; $ENTRY * (1 - ($CALC_RANGE * 0.015))" | bc -l)")
+
+# Ensure SL is not negative and at least a reasonable distance (cap at 30% absolute SL)
+if (( $(echo "$SL <= 0" | bc -l) )); then
+  SL=$(normalize_decimal "$(echo "scale=10; $ENTRY * 0.70" | bc -l)")
+fi
 
 # ── Evaluate existing trade state ──────────────────────────────
 info "Evaluating trade state…"
@@ -356,15 +366,15 @@ OPEN_TRADE_AI=$(echo "$OPEN_TRADE" | jq -c '{
   sl:    ("$" + (.sl    | tostring))
 }')
 
-STATS_STR=$(jq -s '
+STATS_STR=$(jq -rs '
   map(select(.result != null)) |
   (map(select(.result | startswith("TP"))) | length) as $w |
   (map(select(.result == "STOP_LOSS"))      | length) as $l |
   ($w + $l) as $t |
-  if $t == 0 then "0 Wins - 0 Losses (0%)"
-  else "\($w) Wins - \($l) Losses (\(($w * 100 / $t) | round)%)"
+  if $t == 0 then "Record: 0-0 | Win Rate: 0%"
+  else "Record: \($w)-\($l) | Win Rate: \((($w * 100 / $t) | round))%"
   end
-' "$TRADE_HISTORY_FILE" 2>/dev/null || echo "0 Wins - 0 Losses (0%)")
+' "$TRADE_HISTORY_FILE" 2>/dev/null || echo "Record: 0-0 | Win Rate: 0%")
 
 jq -n --argjson open "${OPEN_TRADE:-null}" --arg status "$TRADE_STATUS" \
   '{open_trade:$open, last_status:$status}' > "$STATE_FILE"
@@ -372,22 +382,32 @@ jq -n --argjson open "${OPEN_TRADE:-null}" --arg status "$TRADE_STATUS" \
 # ── Assemble AI payload ─────────────────────────────────────
 info "Calling NVIDIA/Nebius ($MODEL) — Full Intelligence Pass…"
 
-SYSTEM_PROMPT='You are the elite market strategist for The P.L.U.M.B.U.S. (Price Level Updates, Market Briefings, & Universal Signals).
-Deliver a high-value, professional market transmission that is sharp, actionable, and suitable for a trading desk.
-Inject personality into the voice: confident, direct, and slightly edgy, with a trading-desk cadence that still feels professional.
+CURRENT_DATE=$(date '+%B %d, %Y')
+SYSTEM_PROMPT="You are the elite market strategist for The P.L.U.M.B.U.S. (Price Level Updates, Market Briefings, & Universal Signals).
+Today's date is ${CURRENT_DATE}. 
+
+DEEP KNOWLEDGE ROLE ENFORCEMENT:
+You operate with the expertise of a Tier-1 macro hedge fund analyst. Your analysis must go beyond surface-level price action. 
+- Use professional terminology accurately (e.g., 'liquidity gaps', 'funding rate normalization', 'open interest flush', 'volatility compression', 'delta imbalances').
+- Explain the 'why' behind signals by connecting spot flows to derivative market positioning (Perp signals).
+- Avoid generic retail advice; focus on institutional-grade insight and high-signal data synthesis.
+- Maintain a tone that is authoritative, technically precise, and commercially sharp.
+
+IMPORTANT: This is the INAUGURAL TRANSMISSION. Explicitly welcome the audience to this first-ever official session of The P.L.U.M.B.U.S. and mention today's date (${CURRENT_DATE}) in your analysis.
 Review all provided inputs and synthesize them into a structured JSON briefing that draws from every available data source: scoreboard, active trade state, best candidate, watchlist, spot/perp signal sets, and prior session context.
-When previous session context is available, reference it explicitly in your assessment: how today’s flow confirms, contradicts, or evolves that prior view.
+
+NOTE: The Scoreboard (Record/Win Rate) is already displayed in a separate section. Do NOT include it in your analysis, headline, or briefing_raw.
 
 Required JSON keys:
 - headline: Punchy single-line session summary (max 100 chars).
 - analysis: Detailed paragraph synthesizing the signal narrative and trade context (max 800 chars).
 - trade_rationale: Concise rationale for the best candidate (max 150 chars).
-- position_tracking: Active trade update (entry, tp1, tp2, tp3, sl).
-- watchlist: Clean multi-line grouped list: "📍 OVERSOLD:\n• TICKER ($price)\n📍 OVERBOUGHT:\n• ...\n📍 FUNDING SQUEEZE:\n• ..."
+- position_tracking: A readable text update for the ACTIVE TRADE (Entry, TP1, TP2, TP3, SL). Do NOT use JSON format. Example: \"Entry: \$0.14 | TP1: \$0.15 | Stop: \$0.13\".
+- watchlist: Clean multi-line grouped list: \"📍 OVERSOLD:\n• TICKER (\$price)\n📍 OVERBOUGHT:\n• ...\n📍 FUNDING SQUEEZE:\n• ...\"
 - outlook: Strategic forward-looking teaser (max 250 chars).
 - setups: Array of exactly 3 setup strings for WATCHLIST assets (max 150 chars each).
-- signal_context: Short signal-driven market pulse summary (max 200 chars).
-- briefing_raw: A conversational, Bloomberg-style paragraph addressing "the desk". Use clean ticker names (e.g., BTCUSDT, not sBTCUSDT). Start with a punchy hook. No bullet points. Mention the prior session when relevant. (max 1200 chars).'
+- sentiment_score: An integer from 0 (Extreme Fear) to 100 (Extreme Greed) representing the market mood.
+- briefing_raw: A conversational, Bloomberg-style paragraph addressing \"the desk\". Use clean ticker names (e.g., BTCUSDT, not sBTCUSDT). Start with a punchy hook. No bullet points. (max 1200 chars)."
 
 USER_CONTENT="SCOREBOARD: $STATS_STR
 TRADE STATUS: $TRADE_STATUS
@@ -415,14 +435,14 @@ err_file="./data/nvidia_api_error.txt"
 
 while (( attempt <= RETRY_MAX )); do
   log "NVIDIA API call (attempt $attempt/$RETRY_MAX)..."
-  
+
   # Capture response and curl exit code
   if RESPONSE=$(curl -sfL -X POST "$NVIDIA_URL" \
     --max-time "$NVIDIA_TIMEOUT" \
     -H "Authorization: Bearer $NVIDIA_KEY" \
     -H "Content-Type: application/json" \
     -d "$PAYLOAD" 2>"$err_file"); then
-    
+
     # Check if response contains an error
     if echo "$RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
       api_error=$(echo "$RESPONSE" | jq -r '.error.message // .error // "Unknown error"')
@@ -435,7 +455,7 @@ while (( attempt <= RETRY_MAX )); do
   else
     curl_exit=$?
     err_msg=$(cat "$err_file" 2>/dev/null | tr '\n' ' ' || echo "Unknown error")
-    
+
     case $curl_exit in
       28) warn "NVIDIA API timeout (attempt $attempt/$RETRY_MAX)" ;;
       35) warn "NVIDIA SSL error (attempt $attempt/$RETRY_MAX)" ;;
@@ -443,7 +463,7 @@ while (( attempt <= RETRY_MAX )); do
     esac
     log_event "WARN" "NVIDIA API failed: exit=$curl_exit, error=$err_msg"
   fi
-  
+
   (( attempt++ ))
   if [[ $attempt -le $RETRY_MAX ]]; then 
     sleep "$delay"
@@ -468,6 +488,18 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
   BEST_TICKER=$(echo "$BEST_TRADE_RAW" | jq -r '.symbol' | sed 's/^s//')
   BEST_PRICE=$(format_price "$(echo "$BEST_TRADE_RAW" | jq -r '.lastPx')")
   BEST_SURGE=$(echo "$BEST_TRADE_RAW" | jq -r '.changePct // 0' | xargs printf "%.2f%%")
+  SENTIMENT_SCORE=$(echo "$JSON_OUT" | jq -r '.sentiment_score // 50')
+
+  # Generate Visual (Gauge)
+  GAUGE_COLOR="green"
+  [[ $SENTIMENT_SCORE -lt 40 ]] && GAUGE_COLOR="red"
+  [[ $SENTIMENT_SCORE -lt 60 && $SENTIMENT_SCORE -ge 40 ]] && GAUGE_COLOR="orange"
+
+  CHART_CONFIG="{type:'gauge',data:{datasets:[{value:$SENTIMENT_SCORE,data:[$SENTIMENT_SCORE],backgroundColor:'$GAUGE_COLOR'}]},options:{title:{display:true,text:'MARKET SENTIMENT INDEX',fontColor:'white',fontSize:20},needle:{enabled:true,color:'white'},valueLabel:{display:true,formatter:(v)=>v+'%',fontColor:'white',fontSize:30},chartArea:{backgroundColor:'black'}}}"
+  GAUGE_FILE="./data/sentiment_gauge.png"
+  # URL encode only the config part
+  CONF_ENC=$(python3 -c "import urllib.parse; print(urllib.parse.quote(\"\"\"$CHART_CONFIG\"\"\"))")
+  curl -s -o "$GAUGE_FILE" "https://quickchart.io/chart?c=$CONF_ENC"
 
   ANALYSIS_ESC=$(html_escape "$(echo "$JSON_OUT" | jq -r '.analysis')")
   POS_TRACK_ESC=$(html_escape "$(echo "$JSON_OUT" | jq -r '.position_tracking')")
@@ -477,14 +509,20 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
   STATS_ESC=$(html_escape "$STATS_STR")
   TRADE_RATIONALE=$(echo "$JSON_OUT" | jq -r '.trade_rationale // empty')
   TRADE_RATIONALE_ESC=$(html_escape "$TRADE_RATIONALE")
+  
   if [[ -n "$TRADE_RATIONALE_ESC" ]]; then
-    TRADE_RATIONALE_SECTION="🎯 <b>TRADE RATIONALE</b>\n<blockquote>${TRADE_RATIONALE_ESC}</blockquote>\n\n"
+    TRADE_RATIONALE_SECTION="🎯 <b>TRADE RATIONALE</b>
+<blockquote>${TRADE_RATIONALE_ESC}</blockquote>
+
+"
   else
     TRADE_RATIONALE_SECTION=""
   fi
   SETUPS_HTML=$(echo "$JSON_OUT" | jq -r '.setups[]' | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' | sed 's/^/• /')
   BLOOMBERG_OUT=$(echo "$JSON_OUT" | jq -r '.briefing_raw')
   BLOOMBERG_CLEAN=$(echo "$BLOOMBERG_OUT" | sed 's/\*\*\([^*]*\)\*\*/<b>\1<\/b>/g' | sed -E 's/\bs([A-Z0-9]+USDT)\b/<code>\1<\/code>/g')
+
+  DISCLAIMER="<i>Educational market commentary only. Not financial advice.</i>"
 
   FINAL_MSG="📡 <b>THE P.L.U.M.B.U.S. TRANSMISSION</b>
 📅 <code>${TIME_STAMP}</code>
@@ -498,13 +536,13 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
 📊 <b>DESK ANALYSIS</b>
 ${ANALYSIS_ESC}
 
-${TRADE_RATIONALE_SECTION}🚀 <b>BEST CANDIDATE</b>
+${TRADE_RATIONALE_SECTION}🚀 <b>BEST NEW CANDIDATE</b>
 • <b>Ticker:</b> <code>${BEST_TICKER}</code>
 • <b>Price:</b> <code>\$${BEST_PRICE}</code>
 • <b>24h Surge:</b> <code>${BEST_SURGE}</code>
 
-🎯 <b>POSITION TRACKING</b>
-<pre>${POS_TRACK_ESC}</pre>
+🎯 <b>ACTIVE TRADE TRACKING</b>
+<blockquote>${POS_TRACK_ESC}</blockquote>
 
 🔍 <b>ON RADAR</b>
 <pre>${WATCHLIST_ESC}</pre>
@@ -513,7 +551,10 @@ ${TRADE_RATIONALE_SECTION}🚀 <b>BEST CANDIDATE</b>
 ${OUTLOOK_ESC}
 
 ⚡ <b>HIGH-CONVICTION SETUPS</b>
-${SETUPS_HTML}"
+${SETUPS_HTML}
+
+_________________________________
+${DISCLAIMER}"
 
   RAW_MSG="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -523,9 +564,15 @@ ${BLOOMBERG_CLEAN}
 
   # Send Telegram messages with error handling
   log "Sending Telegram transmission..."
-  
+
   tg_attempt=1 tg_delay="$RETRY_DELAY" tg_err="./data/tg_error.txt"
-  
+
+  # Send Gauge Photo
+  if [[ -f "$GAUGE_FILE" ]]; then
+    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendPhoto" \
+      -F chat_id="$TELEGRAM_CHAT_ID" -F photo="@$GAUGE_FILE" > /dev/null
+  fi
+
   # Send FINAL_MSG
   while (( tg_attempt <= RETRY_MAX )); do
     if TG_RESP=$(curl -s --max-time "$TELEGRAM_TIMEOUT" "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
