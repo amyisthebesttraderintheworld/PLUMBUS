@@ -494,24 +494,22 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
   info "Generating advanced visuals..."
   HEATMAP_FILE="./data/funding_heatmap.png"
   SIGNALS_FILE="./data/top_signals.png"
+  BG_IMAGE="./assets/generated/latest.png"
   
-  # Try to run visualizer if python and dependencies are available
+  # Try to run visualizer and image generator if python is available
   if command -v python3 &>/dev/null; then
     python3 engine/visualizer.py "$SPOT_RAW" "$PERP_RAW" "./data" || warn "Visualizer failed, skipping charts."
+    
+    # Generate New AI Background
+    if [[ -n "${HF_TOKEN:-}" ]]; then
+      info "Generating AI Background..."
+      python3 engine/image_gen.py "Financial Markets" || warn "AI Image Generation failed."
+    else
+      warn "HF_TOKEN not set, skipping AI Background generation."
+    fi
   else
-    warn "python3 not found, skipping advanced visuals."
+    warn "python3 not found, skipping Python-based visuals."
   fi
-
-  # Generate Sentiment Visual (Gauge)
-  GAUGE_COLOR="green"
-  [[ $SENTIMENT_SCORE -lt 40 ]] && GAUGE_COLOR="red"
-  [[ $SENTIMENT_SCORE -lt 60 && $SENTIMENT_SCORE -ge 40 ]] && GAUGE_COLOR="orange"
-
-  CHART_CONFIG="{type:'gauge',data:{datasets:[{value:$SENTIMENT_SCORE,data:[$SENTIMENT_SCORE],backgroundColor:'$GAUGE_COLOR'}]},options:{title:{display:true,text:'MARKET SENTIMENT INDEX',fontColor:'white',fontSize:20},needle:{enabled:true,color:'white'},valueLabel:{display:true,formatter:(v)=>v+'%',fontColor:'white',fontSize:30},chartArea:{backgroundColor:'black'}}}"
-  GAUGE_FILE="./data/sentiment_gauge.png"
-  # URL encode only the config part
-  CONF_ENC=$(python3 -c "import urllib.parse; print(urllib.parse.quote(\"\"\"$CHART_CONFIG\"\"\"))")
-  curl -s -o "$GAUGE_FILE" "https://quickchart.io/chart?c=$CONF_ENC"
 
   ANALYSIS_ESC=$(html_escape "$(echo "$JSON_OUT" | jq -r '.analysis')")
   POS_TRACK_ESC=$(html_escape "$(echo "$JSON_OUT" | jq -r '.position_tracking')")
@@ -579,10 +577,10 @@ ${BLOOMBERG_CLEAN}
 
   tg_attempt=1 tg_delay="$RETRY_DELAY" tg_err="./data/tg_error.txt"
 
-  # Send Sentiment Gauge
-  if [[ -f "$GAUGE_FILE" ]]; then
+  # Send AI Background
+  if [[ -f "$BG_IMAGE" ]]; then
     curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendPhoto" \
-      -F chat_id="$TELEGRAM_CHAT_ID" -F photo="@$GAUGE_FILE" -F caption="Market Sentiment Gauge" > /dev/null
+      -F chat_id="$TELEGRAM_CHAT_ID" -F photo="@$BG_IMAGE" -F caption="📡 THE P.L.U.M.B.U.S. TRANSMISSION | $(date '+%B %d, %Y')" > /dev/null
   fi
 
   # Send Funding Heatmap

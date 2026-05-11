@@ -30,9 +30,11 @@ jobs:
       - name: Run Market Briefing
         env:
           NVIDIA_KEY: ${{ secrets.NVIDIA_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
+          mkdir -p assets/generated
           chmod +x scripts/plumbus.sh run.sh
           ./run.sh
 
@@ -40,6 +42,6 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/trade_state.json data/trade_history.json data/last_brief.txt
-          git commit -m "Automated state update: $(date -u +'%Y-%m-%d %H:%M:%S') UTC" || echo "No changes to commit"
+          git add data/trade_state.json data/trade_history.json data/last_brief.txt assets/generated/latest.png
+          git commit -m "Automated state and asset update: $(date -u +'%Y-%m-%d %H:%M:%S') UTC" || echo "No changes to commit"
           git push
