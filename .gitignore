@@ -1,1 +1,8 @@
 .env
+*.pem
+data/*.json
+data/*.png
+data/*.lock
+plumbus.log
+__pycache__/
+*.err
