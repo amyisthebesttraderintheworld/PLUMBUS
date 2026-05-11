@@ -501,11 +501,11 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
     python3 engine/visualizer.py "$SPOT_RAW" "$PERP_RAW" "./data" || warn "Visualizer failed, skipping charts."
     
     # Generate New AI Background
-    if [[ -n "${HF_TOKEN:-}" ]]; then
-      info "Generating AI Background..."
-      python3 engine/image_gen.py "Financial Markets" || warn "AI Image Generation failed."
+    if [[ -n "${GEMINI_API_KEY:-}" ]]; then
+      info "Generating AI Background via Gemini..."
+      python3 engine/image_gen.py "Financial Markets" || warn "Gemini Image Generation failed."
     else
-      warn "HF_TOKEN not set, skipping AI Background generation."
+      warn "GEMINI_API_KEY not set, skipping AI Background generation."
     fi
   else
     warn "python3 not found, skipping Python-based visuals."

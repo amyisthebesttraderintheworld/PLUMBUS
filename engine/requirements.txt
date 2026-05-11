@@ -9,3 +9,4 @@ cryptography
 scipy
 networkx
 requests
+google-generativeai
