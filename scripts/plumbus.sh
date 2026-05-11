@@ -490,7 +490,19 @@ if [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]]; then
   BEST_SURGE=$(echo "$BEST_TRADE_RAW" | jq -r '.changePct // 0' | xargs printf "%.2f%%")
   SENTIMENT_SCORE=$(echo "$JSON_OUT" | jq -r '.sentiment_score // 50')
 
-  # Generate Visual (Gauge)
+  # Generate Visuals
+  info "Generating advanced visuals..."
+  HEATMAP_FILE="./data/funding_heatmap.png"
+  SIGNALS_FILE="./data/top_signals.png"
+  
+  # Try to run visualizer if python and dependencies are available
+  if command -v python3 &>/dev/null; then
+    python3 engine/visualizer.py "$SPOT_RAW" "$PERP_RAW" "./data" || warn "Visualizer failed, skipping charts."
+  else
+    warn "python3 not found, skipping advanced visuals."
+  fi
+
+  # Generate Sentiment Visual (Gauge)
   GAUGE_COLOR="green"
   [[ $SENTIMENT_SCORE -lt 40 ]] && GAUGE_COLOR="red"
   [[ $SENTIMENT_SCORE -lt 60 && $SENTIMENT_SCORE -ge 40 ]] && GAUGE_COLOR="orange"
@@ -567,10 +579,22 @@ ${BLOOMBERG_CLEAN}
 
   tg_attempt=1 tg_delay="$RETRY_DELAY" tg_err="./data/tg_error.txt"
 
-  # Send Gauge Photo
+  # Send Sentiment Gauge
   if [[ -f "$GAUGE_FILE" ]]; then
     curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendPhoto" \
-      -F chat_id="$TELEGRAM_CHAT_ID" -F photo="@$GAUGE_FILE" > /dev/null
+      -F chat_id="$TELEGRAM_CHAT_ID" -F photo="@$GAUGE_FILE" -F caption="Market Sentiment Gauge" > /dev/null
+  fi
+
+  # Send Funding Heatmap
+  if [[ -f "$HEATMAP_FILE" ]]; then
+    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendPhoto" \
+      -F chat_id="$TELEGRAM_CHAT_ID" -F photo="@$HEATMAP_FILE" -F caption="Perp Funding Heatmap" > /dev/null
+  fi
+
+  # Send Signal Movers Chart
+  if [[ -f "$SIGNALS_FILE" ]]; then
+    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendPhoto" \
+      -F chat_id="$TELEGRAM_CHAT_ID" -F photo="@$SIGNALS_FILE" -F caption="Top Signal Leaders" > /dev/null
   fi
 
   # Send FINAL_MSG
