@@ -3,7 +3,7 @@ import json
 import logging
 from data_ingestion import DataIngestion
 from arbitrage_detector import ArbitrageDetector
-from technical_analysis import TechnicalAnalysis, FractalGeometryFilter
+from technical_analysis import TechnicalAnalysis
 from ai_agents import MultiAgentOptimizer
 from telegram_bot import TelegramDelivery
 import time
@@ -17,7 +17,6 @@ class TradingEngine:
         self.data_ingestion = DataIngestion(config['exchanges'], config['symbols'])
         self.arbitrage_detector = ArbitrageDetector(config['fee_matrix'], config['latency_compensation'])
         self.ta = TechnicalAnalysis()
-        self.fractal_filter = FractalGeometryFilter()
         self.ai_optimizer = MultiAgentOptimizer(config['nvidia_api_key'], config['sentiment_api_key'])
         self.telegram = TelegramDelivery(config['telegram_token'], config['chat_id'], config['private_key_path'])
 
@@ -42,18 +41,16 @@ class TradingEngine:
             volumes = [1000] * 100
 
             indicators = self.ta.calculate_indicators(prices, volumes)
-            fractal_analysis = self.fractal_filter.analyze_self_similarity(prices)
 
             # Combine metrics
             combined_metrics = {
                 'arbitrage': opp,
-                'indicators': indicators,
-                'fractal': fractal_analysis
+                'indicators': indicators
             }
 
             # Run AI agents
             orderbooks = [ob for ob in data['orderbooks'] if ob['symbol'] == symbol]
-            ai_result = self.ai_optimizer.optimize_signal(combined_metrics, fractal_analysis, symbol, orderbooks)
+            ai_result = self.ai_optimizer.optimize_signal(combined_metrics, symbol, orderbooks)
 
             if ai_result['final_decision']:
                 signal = {

@@ -16,10 +16,9 @@ A comprehensive, modular trading signal and arbitrage detection engine.
 
 ### Technical Analysis Pipeline
 - Basic indicators via TA-Lib (RSI, MACD, Bollinger Bands, etc.).
-- Custom Fractal Geometry Filter using recursive Sierpinski-style subdivision for self-similarity analysis across timeframes.
 
 ### Multi-Agent AI Optimization
-- Agent 1: Proposes trades based on arbitrage and fractal metrics.
+- Agent 1: Proposes trades based on arbitrage metrics.
 - Agent 2: Critiques proposals using sentiment APIs, order book imbalances, and news velocity.
 - Devil's Advocate loop to validate signals.
 

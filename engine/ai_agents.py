@@ -52,12 +52,11 @@ class MultiAgentOptimizer:
         self.sentiment_api = SentimentAPI(sentiment_api_key)
         self.ai = NVIDIAAI(nvidia_api_key)
 
-    def agent_propose_trade(self, arbitrage_data: Dict, fractal_data: Dict) -> Dict[str, Any]:
+    def agent_propose_trade(self, arbitrage_data: Dict) -> Dict[str, Any]:
         """Agent 1: Propose trade based on data"""
         prompt = f"""
-        Based on the following arbitrage opportunities and fractal analysis, propose a trading signal.
+        Based on the following arbitrage opportunities, propose a trading signal.
         Arbitrage: {json.dumps(arbitrage_data)}
-        Fractal: {json.dumps(fractal_data)}
         Propose a trade with entry, exit, and rationale.
         """
         proposal = self.ai.call_ai(prompt)
@@ -86,9 +85,9 @@ class MultiAgentOptimizer:
         imbalance = (total_bid_volume - total_ask_volume) / (total_bid_volume + total_ask_volume) if total_bid_volume + total_ask_volume > 0 else 0
         return {"imbalance_ratio": imbalance, "bid_volume": total_bid_volume, "ask_volume": total_ask_volume}
 
-    def optimize_signal(self, arbitrage_data: Dict, fractal_data: Dict, symbol: str, orderbook_data: List[Dict]) -> Dict[str, Any]:
+    def optimize_signal(self, arbitrage_data: Dict, symbol: str, orderbook_data: List[Dict]) -> Dict[str, Any]:
         """Run the multi-agent loop"""
-        proposal = self.agent_propose_trade(arbitrage_data, fractal_data)
+        proposal = self.agent_propose_trade(arbitrage_data)
         critique = self.agent_critique_trade(proposal, symbol, orderbook_data)
 
         # Decide based on critique
