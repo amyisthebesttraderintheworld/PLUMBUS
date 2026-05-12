@@ -111,6 +111,8 @@ fetch_json() {
 }
 
 # ── Preflight checks ──────────────────────────────────────────
+mkdir -p data assets/generated reports
+
 if [[ -f "$ENV_FILE" ]]; then
   source "$ENV_FILE"
 fi
@@ -119,6 +121,13 @@ fi
 command -v jq   &>/dev/null || die "jq is required but not installed."
 command -v curl &>/dev/null || die "curl is required but not installed."
 command -v bc   &>/dev/null || die "bc is required but not installed."
+
+# ── Inaugural State ───────────────────────────────────────────
+INAUGURAL_SENT_FILE="./data/inaugural_sent"
+IS_INAUGURAL=false
+if [[ ! -f "$INAUGURAL_SENT_FILE" ]]; then
+  IS_INAUGURAL=true
+fi
 
 # ── Mutex Lock ────────────────────────────────────────────────
 LOCKFILE="./data/plumbus_brief.lock"
@@ -383,6 +392,14 @@ jq -n --argjson open "${OPEN_TRADE:-null}" --arg status "$TRADE_STATUS" \
 info "Calling NVIDIA/Nebius ($MODEL) — Full Intelligence Pass…"
 
 CURRENT_DATE=$(date '+%B %d, %Y')
+# Set Inaugural Context
+INAUGURAL_INSTRUCTION=""
+if [[ "$IS_INAUGURAL" == "true" ]]; then
+  INAUGURAL_INSTRUCTION="IMPORTANT: This is the INAUGURAL TRANSMISSION. Explicitly welcome the audience to this first-ever official session of The P.L.U.M.B.U.S. and mention today's date (${CURRENT_DATE}) in your analysis. This must be a memorable and grand opening."
+else
+  INAUGURAL_INSTRUCTION="This is a regular daily update. Briefly reference the previous session context where appropriate to maintain continuity."
+fi
+
 SYSTEM_PROMPT="You are the elite market strategist for The P.L.U.M.B.U.S. (Price Level Updates, Market Briefings, & Universal Signals).
 Today's date is ${CURRENT_DATE}. 
 
@@ -393,7 +410,7 @@ You operate with the expertise of a Tier-1 macro hedge fund analyst. Your analys
 - Avoid generic retail advice; focus on institutional-grade insight and high-signal data synthesis.
 - Maintain a tone that is authoritative, technically precise, and commercially sharp.
 
-IMPORTANT: This is the INAUGURAL TRANSMISSION. Explicitly welcome the audience to this first-ever official session of The P.L.U.M.B.U.S. and mention today's date (${CURRENT_DATE}) in your analysis.
+${INAUGURAL_INSTRUCTION}
 Review all provided inputs and synthesize them into a structured JSON briefing that draws from every available data source: scoreboard, active trade state, best candidate, watchlist, spot/perp signal sets, and prior session context.
 
 NOTE: The Scoreboard (Record/Win Rate) is already displayed in a separate section. Do NOT include it in your analysis, headline, or briefing_raw.
@@ -579,8 +596,18 @@ ${BLOOMBERG_CLEAN}
 
   # Send AI Background
   if [[ -f "$BG_IMAGE" ]]; then
-    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendPhoto" \
-      -F chat_id="$TELEGRAM_CHAT_ID" -F photo="@$BG_IMAGE" -F caption="📡 THE P.L.U.M.B.U.S. TRANSMISSION | $(date '+%B %d, %Y')" > /dev/null
+    log "Sending AI Background..."
+    CAPTION="📡 THE P.L.U.M.B.U.S. TRANSMISSION | $(date '+%B %d, %Y')"
+    if [[ "$IS_INAUGURAL" == "true" ]]; then
+      CAPTION="🚀 INAUGURAL TRANSMISSION | THE P.L.U.M.B.U.S. | $(date '+%B %d, %Y')"
+    fi
+    TG_RESP_IMG=$(curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendPhoto" \
+      -F chat_id="$TELEGRAM_CHAT_ID" -F photo="@$BG_IMAGE" -F caption="$CAPTION")
+    if echo "$TG_RESP_IMG" | jq -e '.ok == true' >/dev/null 2>&1; then
+      ok "AI Background sent"
+    else
+      warn "Failed to send AI Background: $(echo "$TG_RESP_IMG" | jq -r '.description // "Unknown error"')"
+    fi
   fi
 
   # Send Funding Heatmap
@@ -635,6 +662,8 @@ ${BLOOMBERG_CLEAN}
   done
   
   ok "Transmission complete."
+  # Mark inaugural as sent
+  [[ "$IS_INAUGURAL" == "true" ]] && touch "$INAUGURAL_SENT_FILE"
 fi
 
 log "Tokens: $(jq -r '.usage.total_tokens // "?"' <<<"$RESPONSE")"
